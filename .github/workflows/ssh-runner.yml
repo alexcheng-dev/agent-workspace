@@ -2,6 +2,11 @@ name: 🖥️ SSH Runner (6 hour idle)
 
 on:
   workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        description: OpenSSH public key authorized for runner access
+        required: true
+        type: string
 
 jobs:
   ssh-session:
@@ -22,15 +27,13 @@ jobs:
 
           mkdir -p ~/.ssh /tmp/lolgames-ssh
           chmod 700 ~/.ssh
-          ssh-keygen -t ed25519 -f /tmp/lolgames-ssh/id_ed25519 -N "" -q
-          cat /tmp/lolgames-ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+          printf '%s\n' "${{ inputs.ssh_public_key }}" >> ~/.ssh/authorized_keys
           chmod 600 ~/.ssh/authorized_keys
 
           sudo mkdir -p /run/sshd
           sudo /usr/sbin/sshd -p 2222 -o PasswordAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes
 
-          RUN_SUFFIX="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          PUBLIC_NAME="runner-${RUN_SUFFIX}-ssh"
+          PUBLIC_NAME="runner-${GITHUB_RUN_ID}-1-ssh"
           PUBLIC_PORT="$((30000 + (GITHUB_RUN_ID % 20000)))"
 
           nohup python3 scripts/lolgames_tunnel.py client 127.0.0.1:2222 \
@@ -56,8 +59,6 @@ jobs:
             echo "host=$HOST"
             echo "port=$PUBLIC_PORT"
           } > /tmp/ssh-link.txt
-          cp /tmp/lolgames-ssh/id_ed25519 /tmp/id_ed25519
-          chmod 600 /tmp/id_ed25519
 
           echo "ssh-cmd=$SSH_CMD" >> "$GITHUB_OUTPUT"
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
@@ -74,9 +75,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ssh-link
-          path: |
-            /tmp/ssh-link.txt
-            /tmp/id_ed25519
+          path: /tmp/ssh-link.txt
           if-no-files-found: error
 
       - name: Keep alive 6 hours
