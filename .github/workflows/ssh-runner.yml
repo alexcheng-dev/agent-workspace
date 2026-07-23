@@ -77,6 +77,8 @@ jobs:
           {
             echo "host=$HOST"
             echo "port=$PUBLIC_PORT"
+            echo "ssh_target=runner@${HOST}:${PUBLIC_PORT}"
+            echo "sshd_ready=yes"
             echo "runner_name=$(hostname)"
             echo "tunnel_pid=$TUNNEL_PID"
             echo "tunnel_log_tail<<EOF"
