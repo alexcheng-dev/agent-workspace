@@ -246,6 +246,22 @@ jobs:
           fi
           SNAPSHOT_PATH="/tmp/${SNAPSHOT_ID}.tar.gz"
 
+          if ! sudo incus info "$VM_NAME" >/dev/null 2>&1; then
+            echo "VM $VM_NAME not present on this runner; skipping stateful export."
+            {
+              echo "snapshot_vm_name="
+              echo "snapshot_id="
+              echo "snapshot_release_tag="
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "snapshot_vm_name=$VM_NAME"
+              echo "snapshot_skipped=missing-vm"
+              echo "snapshot_release_tag=$RELEASE_TAG"
+              echo "checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } > /tmp/incus-export.txt
+            exit 0
+          fi
+
           sudo incus stop "$VM_NAME" --stateful
           sudo incus export "$VM_NAME" "$SNAPSHOT_PATH"
           sudo chown "$USER:$USER" "$SNAPSHOT_PATH"
