@@ -27,7 +27,7 @@ jobs:
           set -euo pipefail
           mkdir -p cache-probe
           start=$(date +%s)
-          fallocate -l "${{ inputs.size_mb }}M" cache-probe/payload.bin
+          dd if=/dev/urandom of=cache-probe/payload.bin bs=1M count=${{ inputs.size_mb }} status=none
           sha256sum cache-probe/payload.bin | tee cache-probe/payload.sha256
           end=$(date +%s)
           echo "GENERATE_SECONDS=$((end-start))" >> "$GITHUB_STEP_SUMMARY"
