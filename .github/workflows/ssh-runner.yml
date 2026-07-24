@@ -19,10 +19,6 @@ on:
         description: Stable Worker Agents lolgames prefix for refresh/provision flows
         required: false
         type: string
-      lolgames_tunnel_prefix:
-        description: Stable Worker Agents lolgames prefix for refresh/provision flows
-        required: false
-        type: string
       test_sleep_seconds:
         description: Override keepalive sleep (seconds). Default 18000 (5h). Use 120 for 2min test.
         required: false
