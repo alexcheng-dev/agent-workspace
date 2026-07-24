@@ -19,6 +19,14 @@ on:
         description: Stable Worker Agents lolgames prefix for refresh/provision flows
         required: false
         type: string
+      lolgames_tunnel_prefix:
+        description: Stable Worker Agents lolgames prefix for refresh/provision flows
+        required: false
+        type: string
+      test_sleep_seconds:
+        description: Override keepalive sleep (seconds). Default 18000 (5h). Use 120 for 2min test.
+        required: false
+        type: string
 
 permissions:
   actions: write
@@ -139,10 +147,14 @@ jobs:
           path: /tmp/ssh-status.txt
           if-no-files-found: error
 
-      - name: Keep alive 5 hours
+      - name: Keep alive
         run: |
-          echo "Runner alive for 5 hours..."
-          sleep 18000
+          SLEEP="${{ inputs.test_sleep_seconds }}"
+          if [[ -z "$SLEEP" ]]; then
+            SLEEP=18000
+          fi
+          echo "Runner alive for $SLEEP seconds..."
+          sleep "$SLEEP"
 
       - name: Dispatch successor run
         env:
@@ -160,6 +172,7 @@ jobs:
                   "lolgames_ssh_name": """${{ steps.lolgames_ssh.outputs.host }}""".strip().removesuffix(".lolgames.net"),
                   "lolgames_ssh_port": """${{ steps.lolgames_ssh.outputs.port }}""".strip(),
                   "lolgames_tunnel_prefix": """${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}""".strip(),
+                  "test_sleep_seconds": """${{ inputs.test_sleep_seconds }}""".strip(),
               },
           }
           print(json.dumps(payload))
