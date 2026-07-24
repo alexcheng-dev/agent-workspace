@@ -31,6 +31,10 @@ on:
         description: Release tag holding stateful Incus snapshot chunks
         required: false
         type: string
+      incus_bootstrap_script_b64:
+        description: Optional base64-encoded shell script to run inside a freshly created VM on the first run
+        required: false
+        type: string
       test_sleep_seconds:
         description: Override keepalive sleep (seconds). Default 3600 (1h test). Use 120 for 2min test.
         required: false
@@ -196,6 +200,84 @@ jobs:
           path: /tmp/incus-restore.txt
           if-no-files-found: error
 
+      - name: Bootstrap Incus VM on first run
+        id: incus_bootstrap
+        if: ${{ inputs.incus_stateful_vm_name != '' && inputs.incus_stateful_snapshot_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y incus qemu-system-x86 qemu-utils
+
+          if ! sudo test -S /var/lib/incus/unix.socket; then
+            sudo incus admin init --auto
+          fi
+
+          VM_NAME="${{ inputs.incus_stateful_vm_name }}"
+
+          if sudo incus info "$VM_NAME" >/dev/null 2>&1; then
+            echo "VM $VM_NAME already exists; skipping bootstrap."
+          else
+            sudo incus launch images:ubuntu/noble/cloud "$VM_NAME" --vm -c limits.memory=2048MiB -c limits.cpu=2
+            sudo incus config set "$VM_NAME" migration.stateful true
+            sudo incus config device override "$VM_NAME" root size.state=4GiB
+          fi
+
+          for _ in $(seq 1 90); do
+            if sudo incus exec "$VM_NAME" -- bash -lc 'echo ready' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          sudo incus exec "$VM_NAME" -- bash -lc 'echo ready' >/dev/null 2>&1
+
+          sudo tee /tmp/incus-bootstrap.sh >/dev/null <<'EOS'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          cat >/root/incus-heartbeat.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          i=0
+          while true; do
+            printf '%s pid=%s i=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$i" >> /root/incus-heartbeat.log
+            i=$((i+1))
+            sleep 1
+          done
+          EOF
+          chmod +x /root/incus-heartbeat.sh
+          pgrep -af /root/incus-heartbeat.sh >/dev/null 2>&1 || nohup /root/incus-heartbeat.sh >/root/incus-heartbeat.stdout 2>&1 &
+          if [[ -n "${INCUS_BOOTSTRAP_SCRIPT_B64:-}" ]]; then
+            printf '%s' "$INCUS_BOOTSTRAP_SCRIPT_B64" | base64 -d >/root/incus-bootstrap-extra.sh
+            chmod +x /root/incus-bootstrap-extra.sh
+            /root/incus-bootstrap-extra.sh
+          fi
+          echo BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
+          echo HEARTBEAT_PID=$(pgrep -fo /root/incus-heartbeat.sh || true)
+          tail -5 /root/incus-heartbeat.log || true
+          EOS
+          chmod +x /tmp/incus-bootstrap.sh
+
+          sudo incus file push /tmp/incus-bootstrap.sh "$VM_NAME"/root/incus-bootstrap.sh
+          sudo incus exec "$VM_NAME" -- env INCUS_BOOTSTRAP_SCRIPT_B64='${{ inputs.incus_bootstrap_script_b64 }}' bash /root/incus-bootstrap.sh
+
+          {
+            echo "bootstrapped_vm_name=$VM_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "bootstrapped_vm_name=$VM_NAME"
+            echo "bootstrapped_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > /tmp/incus-bootstrap.txt
+
+      - name: Upload Incus bootstrap artifact
+        if: ${{ steps.incus_bootstrap.outputs.bootstrapped_vm_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: incus-bootstrap
+          path: /tmp/incus-bootstrap.txt
+          if-no-files-found: error
+
       - name: Upload SSH link as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -310,6 +392,7 @@ jobs:
                   "incus_stateful_vm_name": """${{ inputs.incus_stateful_vm_name }}""".strip(),
                   "incus_stateful_snapshot_id": """${{ steps.incus_export.outputs.snapshot_id }}""".strip(),
                   "incus_stateful_release_tag": """${{ steps.incus_export.outputs.snapshot_release_tag || inputs.incus_stateful_release_tag }}""".strip(),
+                  "incus_bootstrap_script_b64": """${{ inputs.incus_bootstrap_script_b64 }}""".strip(),
                   "test_sleep_seconds": """${{ inputs.test_sleep_seconds }}""".strip(),
               },
           }
