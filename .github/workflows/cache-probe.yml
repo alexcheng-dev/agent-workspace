@@ -1,0 +1,62 @@
+name: cache-probe
+on:
+  workflow_dispatch:
+    inputs:
+      cache_key:
+        description: Cache key
+        required: true
+        type: string
+      size_mb:
+        description: Probe file size in MB
+        required: false
+        default: '256'
+        type: string
+permissions:
+  actions: write
+  contents: read
+jobs:
+  save:
+    runs-on: ubuntu-latest
+    outputs:
+      cache_key: ${{ steps.meta.outputs.cache_key }}
+      size_mb: ${{ steps.meta.outputs.size_mb }}
+    steps:
+      - id: meta
+        run: |
+          echo "cache_key=${{ inputs.cache_key }}" >> "$GITHUB_OUTPUT"
+          echo "size_mb=${{ inputs.size_mb }}" >> "$GITHUB_OUTPUT"
+      - name: Generate payload
+        run: |
+          set -euo pipefail
+          mkdir -p cache-probe
+          start=$(date +%s)
+          fallocate -l "${{ inputs.size_mb }}M" cache-probe/payload.bin
+          sha256sum cache-probe/payload.bin | tee cache-probe/payload.sha256
+          end=$(date +%s)
+          echo "GENERATE_SECONDS=$((end-start))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save cache
+        id: cache-save
+        uses: actions/cache/save@v4
+        with:
+          path: cache-probe
+          key: ${{ inputs.cache_key }}
+  restore:
+    needs: save
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: cache-probe
+          key: ${{ needs.save.outputs.cache_key }}
+          fail-on-cache-miss: true
+      - name: Verify payload
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          test -f cache-probe/payload.bin
+          sha256sum -c cache-probe/payload.sha256
+          du -sh cache-probe | tee -a "$GITHUB_STEP_SUMMARY"
+          end=$(date +%s)
+          echo "VERIFY_SECONDS=$((end-start))" | tee -a "$GITHUB_STEP_SUMMARY"
