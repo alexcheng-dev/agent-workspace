@@ -281,7 +281,7 @@ jobs:
           echo HEARTBEAT_PID=$(pgrep -fo /root/incus-heartbeat.sh || true)
           tail -5 /root/incus-heartbeat.log || true
           EOS
-          chmod +x /tmp/incus-bootstrap.sh
+          sudo chmod +x /tmp/incus-bootstrap.sh
 
           sudo incus file push /tmp/incus-bootstrap.sh "$VM_NAME"/root/incus-bootstrap.sh
           sudo incus exec "$VM_NAME" -- env INCUS_BOOTSTRAP_SCRIPT_B64='${{ inputs.incus_bootstrap_script_b64 }}' bash /root/incus-bootstrap.sh
