@@ -243,48 +243,39 @@ jobs:
           if sudo incus info "$VM_NAME" >/dev/null 2>&1; then
             echo "VM $VM_NAME already exists; skipping bootstrap."
           else
+            cat >/tmp/incus-cloud-init.yaml <<EOF
+#cloud-config
+write_files:
+  - path: /root/incus-heartbeat.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      i=0
+      while true; do
+        printf '%s pid=%s i=%s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$\$" "\$i" >> /root/incus-heartbeat.log
+        i=\$((i+1))
+        sleep 1
+      done
+  - path: /root/incus-bootstrap-extra.b64
+    permissions: '0600'
+    encoding: b64
+    content: ${{ inputs.incus_bootstrap_script_b64 }}
+runcmd:
+  - [ bash, -lc, 'pgrep -af /root/incus-heartbeat.sh >/dev/null 2>&1 || nohup /root/incus-heartbeat.sh >/root/incus-heartbeat.stdout 2>&1 &' ]
+  - [ bash, -lc, 'if [ -s /root/incus-bootstrap-extra.b64 ]; then base64 -d /root/incus-bootstrap-extra.b64 >/root/incus-bootstrap-extra.sh && chmod +x /root/incus-bootstrap-extra.sh && /root/incus-bootstrap-extra.sh; fi' ]
+  - [ bash, -lc, 'echo BOOT_ID=$(cat /proc/sys/kernel/random/boot_id) > /root/incus-bootstrap-status.txt' ]
+  - [ bash, -lc, 'echo HEARTBEAT_STARTED=1 >> /root/incus-bootstrap-status.txt' ]
+EOF
             sudo incus init images:ubuntu/noble/cloud "$VM_NAME" --vm -c limits.memory=2048MiB -c limits.cpu=2
+            sudo incus config set "$VM_NAME" user.user-data - </tmp/incus-cloud-init.yaml
             sudo incus config set "$VM_NAME" migration.stateful true
             sudo incus config device override "$VM_NAME" root size.state=4GiB
             sudo incus start "$VM_NAME"
+            sleep 45
           fi
 
-          for _ in $(seq 1 90); do
-            if sudo incus exec "$VM_NAME" -- bash -lc 'echo ready' >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          sudo incus exec "$VM_NAME" -- bash -lc 'echo ready' >/dev/null 2>&1
-
-          sudo tee /tmp/incus-bootstrap.sh >/dev/null <<'EOS'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          cat >/root/incus-heartbeat.sh <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          i=0
-          while true; do
-            printf '%s pid=%s i=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$i" >> /root/incus-heartbeat.log
-            i=$((i+1))
-            sleep 1
-          done
-          EOF
-          chmod +x /root/incus-heartbeat.sh
-          pgrep -af /root/incus-heartbeat.sh >/dev/null 2>&1 || nohup /root/incus-heartbeat.sh >/root/incus-heartbeat.stdout 2>&1 &
-          if [[ -n "${INCUS_BOOTSTRAP_SCRIPT_B64:-}" ]]; then
-            printf '%s' "$INCUS_BOOTSTRAP_SCRIPT_B64" | base64 -d >/root/incus-bootstrap-extra.sh
-            chmod +x /root/incus-bootstrap-extra.sh
-            /root/incus-bootstrap-extra.sh
-          fi
-          echo BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
-          echo HEARTBEAT_PID=$(pgrep -fo /root/incus-heartbeat.sh || true)
-          tail -5 /root/incus-heartbeat.log || true
-          EOS
-          sudo chmod +x /tmp/incus-bootstrap.sh
-
-          sudo incus file push /tmp/incus-bootstrap.sh "$VM_NAME"/root/incus-bootstrap.sh
-          sudo incus exec "$VM_NAME" -- env INCUS_BOOTSTRAP_SCRIPT_B64='${{ inputs.incus_bootstrap_script_b64 }}' bash /root/incus-bootstrap.sh
+          sudo incus info "$VM_NAME"
 
           {
             echo "bootstrapped_vm_name=$VM_NAME"
