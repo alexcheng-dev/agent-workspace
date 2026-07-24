@@ -1,4 +1,4 @@
-name: 🖥️ SSH Runner (5 hour renewable)
+name: 🖥️ SSH Runner (1 hour renewable test)
 
 on:
   workflow_dispatch:
@@ -19,14 +19,26 @@ on:
         description: Stable Worker Agents lolgames prefix for refresh/provision flows
         required: false
         type: string
+      incus_stateful_vm_name:
+        description: Optional Incus VM name to hand off via stateful export/import
+        required: false
+        type: string
+      incus_stateful_snapshot_id:
+        description: Optional stateful Incus snapshot id to import on startup
+        required: false
+        type: string
+      incus_stateful_release_tag:
+        description: Release tag holding stateful Incus snapshot chunks
+        required: false
+        type: string
       test_sleep_seconds:
-        description: Override keepalive sleep (seconds). Default 18000 (5h). Use 120 for 2min test.
+        description: Override keepalive sleep (seconds). Default 3600 (1h test). Use 120 for 2min test.
         required: false
         type: string
 
 permissions:
   actions: write
-  contents: read
+  contents: write
 
 concurrency:
   group: ssh-runner-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
@@ -35,7 +47,7 @@ concurrency:
 jobs:
   ssh-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 310
+    timeout-minutes: 130
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -129,6 +141,61 @@ jobs:
           echo "Port: $PUBLIC_PORT"
           echo "============================================"
 
+      - name: Restore Incus VM from release snapshot
+        id: incus_restore
+        if: ${{ inputs.incus_stateful_snapshot_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y incus qemu-system-x86 qemu-utils
+          sudo usermod -aG incus,incus-admin "$USER" || true
+
+          if ! sudo test -S /var/lib/incus/unix.socket; then
+            sudo incus admin init --auto
+          fi
+
+          SNAPSHOT_ID="${{ inputs.incus_stateful_snapshot_id }}"
+          VM_NAME="${{ inputs.incus_stateful_vm_name }}"
+          RELEASE_TAG="${{ inputs.incus_stateful_release_tag }}"
+          if [[ -z "$RELEASE_TAG" ]]; then
+            RELEASE_TAG="worker-snapshots"
+          fi
+          SNAPSHOT_PATH="/tmp/${SNAPSHOT_ID}.tar.gz"
+
+          chmod +x scripts/transfer-worker-snapshot-via-release.sh
+          REPO="${GITHUB_REPOSITORY}" RELEASE_TAG="$RELEASE_TAG" \
+            scripts/transfer-worker-snapshot-via-release.sh download "$SNAPSHOT_ID" "$SNAPSHOT_PATH"
+
+          sudo incus delete "$VM_NAME" --force >/dev/null 2>&1 || true
+          sudo incus import "$SNAPSHOT_PATH" "$VM_NAME"
+          sudo incus config unset "$VM_NAME" volatile.eth0.hwaddr >/dev/null 2>&1 || true
+          sudo incus start "$VM_NAME"
+
+          {
+            echo "restored_vm_name=$VM_NAME"
+            echo "restored_snapshot_id=$SNAPSHOT_ID"
+            echo "restored_release_tag=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "restored_vm_name=$VM_NAME"
+            echo "restored_snapshot_id=$SNAPSHOT_ID"
+            echo "restored_release_tag=$RELEASE_TAG"
+            echo "restored_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > /tmp/incus-restore.txt
+
+      - name: Upload Incus restore artifact
+        if: ${{ steps.incus_restore.outputs.restored_vm_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: incus-restore
+          path: /tmp/incus-restore.txt
+          if-no-files-found: error
+
       - name: Upload SSH link as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -147,10 +214,66 @@ jobs:
         run: |
           SLEEP="${{ inputs.test_sleep_seconds }}"
           if [[ -z "$SLEEP" ]]; then
-            SLEEP=18000
+            SLEEP=3600
           fi
           echo "Runner alive for $SLEEP seconds..."
           sleep "$SLEEP"
+
+      - name: Export Incus VM state to release snapshot
+        id: incus_export
+        if: ${{ inputs.incus_stateful_vm_name != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y incus qemu-system-x86 qemu-utils
+
+          if ! sudo test -S /var/lib/incus/unix.socket; then
+            sudo incus admin init --auto
+          fi
+
+          VM_NAME="${{ inputs.incus_stateful_vm_name }}"
+          RELEASE_TAG="${{ inputs.incus_stateful_release_tag }}"
+          if [[ -z "$RELEASE_TAG" ]]; then
+            RELEASE_TAG="worker-snapshots"
+          fi
+          SNAPSHOT_ID="${{ inputs.incus_stateful_snapshot_id }}"
+          if [[ -z "$SNAPSHOT_ID" ]]; then
+            SNAPSHOT_ID="${VM_NAME}-stateful-${GITHUB_RUN_ID}"
+          fi
+          SNAPSHOT_PATH="/tmp/${SNAPSHOT_ID}.tar.gz"
+
+          sudo incus stop "$VM_NAME" --stateful
+          sudo incus export "$VM_NAME" "$SNAPSHOT_PATH"
+          sudo chown "$USER:$USER" "$SNAPSHOT_PATH"
+
+          chmod +x scripts/transfer-worker-snapshot-via-release.sh
+          REPO="${GITHUB_REPOSITORY}" RELEASE_TAG="$RELEASE_TAG" \
+            scripts/transfer-worker-snapshot-via-release.sh upload "$SNAPSHOT_PATH" "$SNAPSHOT_ID"
+
+          {
+            echo "snapshot_vm_name=$VM_NAME"
+            echo "snapshot_id=$SNAPSHOT_ID"
+            echo "snapshot_release_tag=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "snapshot_vm_name=$VM_NAME"
+            echo "snapshot_id=$SNAPSHOT_ID"
+            echo "snapshot_release_tag=$RELEASE_TAG"
+            echo "exported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > /tmp/incus-export.txt
+
+      - name: Upload Incus export artifact
+        if: ${{ steps.incus_export.outputs.snapshot_id != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: incus-export
+          path: /tmp/incus-export.txt
+          if-no-files-found: error
 
       - name: Dispatch successor run
         env:
@@ -168,6 +291,9 @@ jobs:
                   "lolgames_ssh_name": """${{ steps.lolgames_ssh.outputs.host }}""".strip().removesuffix(".lolgames.net"),
                   "lolgames_ssh_port": """${{ steps.lolgames_ssh.outputs.port }}""".strip(),
                   "lolgames_tunnel_prefix": """${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}""".strip(),
+                  "incus_stateful_vm_name": """${{ inputs.incus_stateful_vm_name }}""".strip(),
+                  "incus_stateful_snapshot_id": """${{ steps.incus_export.outputs.snapshot_id }}""".strip(),
+                  "incus_stateful_release_tag": """${{ steps.incus_export.outputs.snapshot_release_tag || inputs.incus_stateful_release_tag }}""".strip(),
                   "test_sleep_seconds": """${{ inputs.test_sleep_seconds }}""".strip(),
               },
           }
@@ -187,6 +313,9 @@ jobs:
             echo "host=${{ steps.lolgames_ssh.outputs.host }}"
             echo "port=${{ steps.lolgames_ssh.outputs.port }}"
             echo "lolgames_tunnel_prefix=${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}"
+            echo "incus_stateful_vm_name=${{ inputs.incus_stateful_vm_name }}"
+            echo "incus_stateful_snapshot_id=${{ steps.incus_export.outputs.snapshot_id }}"
+            echo "incus_stateful_release_tag=${{ steps.incus_export.outputs.snapshot_release_tag || inputs.incus_stateful_release_tag }}"
           } > /tmp/ssh-renewal.txt
 
       - name: Upload renewal status artifact
