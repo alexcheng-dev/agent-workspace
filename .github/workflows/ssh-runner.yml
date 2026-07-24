@@ -161,6 +161,18 @@ jobs:
           if ! sudo test -S /var/lib/incus/unix.socket; then
             sudo incus admin init --auto
           fi
+          if ! sudo incus storage show default >/dev/null 2>&1; then
+            sudo incus storage create default dir
+          fi
+          if ! sudo incus network show incusbr0 >/dev/null 2>&1; then
+            sudo incus network create incusbr0 ipv4.address=auto ipv6.address=none
+          fi
+          if ! sudo incus profile device show default | grep -q '^root:'; then
+            sudo incus profile device add default root disk path=/ pool=default
+          fi
+          if ! sudo incus profile device show default | grep -q '^eth0:'; then
+            sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
+          fi
 
           SNAPSHOT_ID="${{ inputs.incus_stateful_snapshot_id }}"
           VM_NAME="${{ inputs.incus_stateful_vm_name }}"
@@ -212,6 +224,18 @@ jobs:
 
           if ! sudo test -S /var/lib/incus/unix.socket; then
             sudo incus admin init --auto
+          fi
+          if ! sudo incus storage show default >/dev/null 2>&1; then
+            sudo incus storage create default dir
+          fi
+          if ! sudo incus network show incusbr0 >/dev/null 2>&1; then
+            sudo incus network create incusbr0 ipv4.address=auto ipv6.address=none
+          fi
+          if ! sudo incus profile device show default | grep -q '^root:'; then
+            sudo incus profile device add default root disk path=/ pool=default
+          fi
+          if ! sudo incus profile device show default | grep -q '^eth0:'; then
+            sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
           fi
 
           VM_NAME="${{ inputs.incus_stateful_vm_name }}"
@@ -315,6 +339,18 @@ jobs:
 
           if ! sudo test -S /var/lib/incus/unix.socket; then
             sudo incus admin init --auto
+          fi
+          if ! sudo incus storage show default >/dev/null 2>&1; then
+            sudo incus storage create default dir
+          fi
+          if ! sudo incus network show incusbr0 >/dev/null 2>&1; then
+            sudo incus network create incusbr0 ipv4.address=auto ipv6.address=none
+          fi
+          if ! sudo incus profile device show default | grep -q '^root:'; then
+            sudo incus profile device add default root disk path=/ pool=default
+          fi
+          if ! sudo incus profile device show default | grep -q '^eth0:'; then
+            sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
           fi
 
           VM_NAME="${{ inputs.incus_stateful_vm_name }}"
