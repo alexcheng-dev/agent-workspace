@@ -243,34 +243,7 @@ jobs:
           if sudo incus info "$VM_NAME" >/dev/null 2>&1; then
             echo "VM $VM_NAME already exists; skipping bootstrap."
           else
-            python3 - <<'PY'
-            from pathlib import Path
-            Path('/tmp/incus-cloud-init.yaml').write_text(
-                "#cloud-config\n"
-                "write_files:\n"
-                "  - path: /root/incus-heartbeat.sh\n"
-                "    permissions: '0755'\n"
-                "    content: |\n"
-                "      #!/usr/bin/env bash\n"
-                "      set -euo pipefail\n"
-                "      i=0\n"
-                "      while true; do\n"
-                "        printf '%s pid=%s i=%s\\\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$$\" \"$i\" >> /root/incus-heartbeat.log\n"
-                "        i=$((i+1))\n"
-                "        sleep 1\n"
-                "      done\n"
-                "  - path: /root/incus-bootstrap-extra.b64\n"
-                "    permissions: '0600'\n"
-                "    encoding: b64\n"
-                "    content: ${{ inputs.incus_bootstrap_script_b64 }}\n"
-                "runcmd:\n"
-                "  - [ bash, -lc, 'pgrep -af /root/incus-heartbeat.sh >/dev/null 2>&1 || nohup /root/incus-heartbeat.sh >/root/incus-heartbeat.stdout 2>&1 &' ]\n"
-                "  - [ bash, -lc, 'if [ -s /root/incus-bootstrap-extra.b64 ]; then base64 -d /root/incus-bootstrap-extra.b64 >/root/incus-bootstrap-extra.sh && chmod +x /root/incus-bootstrap-extra.sh && /root/incus-bootstrap-extra.sh; fi' ]\n"
-                "  - [ bash, -lc, 'echo BOOT_ID=$(cat /proc/sys/kernel/random/boot_id) > /root/incus-bootstrap-status.txt' ]\n"
-                "  - [ bash, -lc, 'echo HEARTBEAT_STARTED=1 >> /root/incus-bootstrap-status.txt' ]\n",
-                encoding="utf-8",
-            )
-            PY
+            INCUS_BOOTSTRAP_SCRIPT_B64='${{ inputs.incus_bootstrap_script_b64 }}' python3 scripts/write-incus-cloud-init.py
             sudo incus init images:ubuntu/noble/cloud "$VM_NAME" --vm -c limits.memory=2048MiB -c limits.cpu=2
             sudo incus config set "$VM_NAME" user.user-data - </tmp/incus-cloud-init.yaml
             sudo incus config set "$VM_NAME" migration.stateful true
