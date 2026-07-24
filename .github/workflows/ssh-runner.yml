@@ -243,9 +243,10 @@ jobs:
           if sudo incus info "$VM_NAME" >/dev/null 2>&1; then
             echo "VM $VM_NAME already exists; skipping bootstrap."
           else
-            sudo incus launch images:ubuntu/noble/cloud "$VM_NAME" --vm -c limits.memory=2048MiB -c limits.cpu=2
+            sudo incus init images:ubuntu/noble/cloud "$VM_NAME" --vm -c limits.memory=2048MiB -c limits.cpu=2
             sudo incus config set "$VM_NAME" migration.stateful true
             sudo incus config device override "$VM_NAME" root size.state=4GiB
+            sudo incus start "$VM_NAME"
           fi
 
           for _ in $(seq 1 90); do
