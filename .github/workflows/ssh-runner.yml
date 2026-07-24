@@ -1,4 +1,4 @@
-name: 🖥️ SSH Runner (6 hour idle)
+name: 🖥️ SSH Runner (5 hour renewable)
 
 on:
   workflow_dispatch:
@@ -7,6 +7,22 @@ on:
         description: OpenSSH public key authorized for runner access
         required: true
         type: string
+      lolgames_ssh_name:
+        description: Stable lolgames SSH hostname prefix
+        required: false
+        type: string
+      lolgames_ssh_port:
+        description: Stable lolgames SSH public port
+        required: false
+        type: string
+      lolgames_tunnel_prefix:
+        description: Stable Worker Agents lolgames prefix for refresh/provision flows
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
 
 concurrency:
   group: ssh-runner-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
@@ -15,7 +31,7 @@ concurrency:
 jobs:
   ssh-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 370
+    timeout-minutes: 310
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -45,8 +61,17 @@ jobs:
           done
           ss -ltn | grep -q ':2222 '
 
-          PUBLIC_NAME="runner-${GITHUB_RUN_ID}-1-ssh"
-          PUBLIC_PORT="$((30000 + (GITHUB_RUN_ID % 20000)))"
+          PUBLIC_NAME="${{ inputs.lolgames_ssh_name }}"
+          if [[ -z "$PUBLIC_NAME" ]]; then
+            PUBLIC_NAME="runner-${GITHUB_RUN_ID}-ssh"
+          fi
+
+          PUBLIC_PORT="${{ inputs.lolgames_ssh_port }}"
+          if [[ -z "$PUBLIC_PORT" ]]; then
+            PUBLIC_PORT="$((30000 + (GITHUB_RUN_ID % 20000)))"
+          fi
+
+          TUNNEL_PREFIX="${{ inputs.lolgames_tunnel_prefix }}"
 
           nohup python3 scripts/lolgames_tunnel.py client 127.0.0.1:2222 \
             --server 161.153.109.33 \
@@ -72,11 +97,13 @@ jobs:
             echo "$WEB_URL"
             echo "host=$HOST"
             echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
           } > /tmp/ssh-link.txt
 
           {
             echo "host=$HOST"
             echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
             echo "ssh_target=runner@${HOST}:${PUBLIC_PORT}"
             echo "sshd_ready=yes"
             echo "runner_name=$(hostname)"
@@ -89,6 +116,7 @@ jobs:
           echo "ssh-cmd=$SSH_CMD" >> "$GITHUB_OUTPUT"
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "port=$PUBLIC_PORT" >> "$GITHUB_OUTPUT"
+          echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX" >> "$GITHUB_OUTPUT"
           echo "============================================"
           echo "  LOLGAMES SSH CONNECTION"
           echo "============================================"
@@ -111,7 +139,55 @@ jobs:
           path: /tmp/ssh-status.txt
           if-no-files-found: error
 
-      - name: Keep alive 6 hours
+      - name: Keep alive 5 hours
         run: |
-          echo "Runner alive for 6 hours..."
-          sleep 21600
+          echo "Runner alive for 5 hours..."
+          sleep 18000
+
+      - name: Dispatch successor run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          payload="$(python3 - <<'PY'
+          import json
+
+          payload = {
+              "ref": "${{ github.ref_name }}",
+              "inputs": {
+                  "ssh_public_key": """${{ inputs.ssh_public_key }}""".strip(),
+                  "lolgames_ssh_name": """${{ steps.lolgames_ssh.outputs.host }}""".strip().removesuffix(".lolgames.net"),
+                  "lolgames_ssh_port": """${{ steps.lolgames_ssh.outputs.port }}""".strip(),
+                  "lolgames_tunnel_prefix": """${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}""".strip(),
+              },
+          }
+          print(json.dumps(payload))
+          PY
+          )"
+
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ssh-runner.yml/dispatches" \
+            -d "$payload"
+
+          {
+            echo "dispatched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "host=${{ steps.lolgames_ssh.outputs.host }}"
+            echo "port=${{ steps.lolgames_ssh.outputs.port }}"
+            echo "lolgames_tunnel_prefix=${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}"
+          } > /tmp/ssh-renewal.txt
+
+      - name: Upload renewal status artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-renewal
+          path: /tmp/ssh-renewal.txt
+          if-no-files-found: error
+
+      - name: Handoff grace period
+        run: |
+          echo "Waiting 60s for successor tunnel handoff..."
+          sleep 60
