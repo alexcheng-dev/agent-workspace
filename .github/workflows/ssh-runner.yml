@@ -1,0 +1,508 @@
+name: 🖥️ SSH Runner (1 hour renewable test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        description: OpenSSH public key authorized for runner access
+        required: true
+        type: string
+      lolgames_ssh_name:
+        description: Stable agentsweb SSH hostname prefix
+        required: false
+        type: string
+      lolgames_ssh_port:
+        description: Stable agentsweb SSH public port
+        required: false
+        type: string
+      lolgames_tunnel_prefix:
+        description: Stable Worker Agents agentsweb prefix for refresh/provision flows
+        required: false
+        type: string
+      incus_stateful_vm_name:
+        description: Optional Incus VM name to hand off via stateful export/import
+        required: false
+        type: string
+      incus_stateful_snapshot_id:
+        description: Optional stateful Incus snapshot id to import on startup
+        required: false
+        type: string
+      incus_stateful_release_tag:
+        description: Release tag holding stateful Incus snapshot chunks
+        required: false
+        type: string
+      incus_bootstrap_script_b64:
+        description: Optional base64-encoded shell script to run inside a freshly created VM on the first run
+        required: false
+        type: string
+      test_sleep_seconds:
+        description: Override keepalive sleep (seconds). Default 3600 (1h). For testing use 600 (10min) or 120 (2min).
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: ssh-runner-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  ssh-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Start SSH over agentsweb
+        id: lolgames_ssh
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y openssh-server tmux
+
+          mkdir -p ~/.ssh /tmp/lolgames-ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ inputs.ssh_public_key }}" >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222 -o PasswordAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes
+
+          for _ in {1..20}; do
+            if ss -ltn | grep -q ':2222 '; then
+              break
+            fi
+            sleep 1
+          done
+          ss -ltn | grep -q ':2222 '
+
+          PUBLIC_NAME="${{ inputs.lolgames_ssh_name }}"
+          if [[ -z "$PUBLIC_NAME" ]]; then
+            PUBLIC_NAME="runner-${GITHUB_RUN_ID}-ssh"
+          fi
+
+          PUBLIC_PORT="${{ inputs.lolgames_ssh_port }}"
+          if [[ -z "$PUBLIC_PORT" ]]; then
+            PUBLIC_PORT="$((30000 + (GITHUB_RUN_ID % 20000)))"
+          fi
+
+          TUNNEL_PREFIX="${{ inputs.lolgames_tunnel_prefix }}"
+
+          nohup env PYTHONPATH="$GITHUB_WORKSPACE" python3 -m lolgames_tunnel client 127.0.0.1:2222 \
+            --server 161.153.109.33 \
+            --name "$PUBLIC_NAME" \
+            --public-port "$PUBLIC_PORT" \
+            > /tmp/lolgames-ssh/tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+
+          for _ in {1..30}; do
+            if grep -q "agentsweb.space" /tmp/lolgames-ssh/tunnel.log; then
+              break
+            fi
+            sleep 1
+          done
+          grep -q "agentsweb.space" /tmp/lolgames-ssh/tunnel.log
+
+          HOST="${PUBLIC_NAME}.agentsweb.space"
+          SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./id_ed25519 -p ${PUBLIC_PORT} runner@${HOST}"
+          WEB_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          {
+            echo "$SSH_CMD"
+            echo "$WEB_URL"
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
+          } > /tmp/ssh-link.txt
+
+          {
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
+            echo "ssh_target=runner@${HOST}:${PUBLIC_PORT}"
+            echo "sshd_ready=yes"
+            echo "runner_name=$(hostname)"
+            echo "tunnel_pid=$TUNNEL_PID"
+            echo "tunnel_log_tail<<EOF"
+            tail -n 20 /tmp/lolgames-ssh/tunnel.log || true
+            echo "EOF"
+          } > /tmp/ssh-status.txt
+
+          echo "ssh-cmd=$SSH_CMD" >> "$GITHUB_OUTPUT"
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "port=$PUBLIC_PORT" >> "$GITHUB_OUTPUT"
+          echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "============================================"
+          echo "  AGENTSWEB SSH CONNECTION"
+          echo "============================================"
+          echo "SSH: $SSH_CMD"
+          echo "Host: $HOST"
+          echo "Port: $PUBLIC_PORT"
+          echo "============================================"
+
+      - name: Restore Incus VM from release snapshot
+        id: incus_restore
+        if: ${{ inputs.incus_stateful_snapshot_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y incus qemu-system-x86 qemu-utils
+          sudo usermod -aG incus,incus-admin "$USER" || true
+
+          if ! sudo test -S /var/lib/incus/unix.socket; then
+            sudo incus admin init --auto
+          fi
+          if ! sudo incus storage show default >/dev/null 2>&1; then
+            sudo incus storage create default dir
+          fi
+          if ! sudo incus network show incusbr0 >/dev/null 2>&1; then
+            sudo incus network create incusbr0 ipv4.address=auto ipv6.address=none
+          fi
+          if ! sudo incus profile device show default | grep -q '^root:'; then
+            sudo incus profile device add default root disk path=/ pool=default
+          fi
+          if ! sudo incus profile device show default | grep -q '^eth0:'; then
+            sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
+          fi
+
+          # Ensure Incus bridge has outbound internet after fresh boot or snapshot restore.
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+          HOST_IFACE="$(ip route show default 0.0.0.0/0 | awk '{print $5; exit}')"
+          if [[ -z "$HOST_IFACE" ]]; then
+            HOST_IFACE="eth0"
+          fi
+          if ! sudo iptables -C FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT
+          fi
+          if ! sudo iptables -C FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          fi
+          if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null; then
+            sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE
+          fi
+          echo "Incus bridge iptables rules configured for $HOST_IFACE"
+
+          SNAPSHOT_ID="${{ inputs.incus_stateful_snapshot_id }}"
+          VM_NAME="${{ inputs.incus_stateful_vm_name }}"
+          RELEASE_TAG="${{ inputs.incus_stateful_release_tag }}"
+          if [[ -z "$RELEASE_TAG" ]]; then
+            RELEASE_TAG="worker-snapshots"
+          fi
+          SNAPSHOT_PATH="/tmp/${SNAPSHOT_ID}.tar.gz"
+
+          chmod +x scripts/transfer-worker-snapshot-via-release.sh
+          REPO="${GITHUB_REPOSITORY}" RELEASE_TAG="$RELEASE_TAG" \
+            scripts/transfer-worker-snapshot-via-release.sh download "$SNAPSHOT_ID" "$SNAPSHOT_PATH"
+
+          sudo incus delete "$VM_NAME" --force >/dev/null 2>&1 || true
+          sudo incus import "$SNAPSHOT_PATH" "$VM_NAME"
+          sudo incus config unset "$VM_NAME" volatile.eth0.hwaddr >/dev/null 2>&1 || true
+          sudo incus start "$VM_NAME"
+
+          echo "Waiting for restored Incus VM agent..."
+          for _ in $(seq 1 180); do
+            if sudo incus exec "$VM_NAME" -- true >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          sudo incus exec "$VM_NAME" -- true >/dev/null
+          sudo incus file push scripts/fix-restored-incus-network.sh "$VM_NAME/root/fix-restored-incus-network.sh"
+          sudo incus exec "$VM_NAME" -- bash /root/fix-restored-incus-network.sh
+
+          if [[ -n '${{ inputs.incus_bootstrap_script_b64 }}' ]]; then
+            printf '%s' '${{ inputs.incus_bootstrap_script_b64 }}' | base64 -d >/tmp/incus-restored-refresh.sh
+            chmod +x /tmp/incus-restored-refresh.sh
+            sudo incus file push /tmp/incus-restored-refresh.sh "$VM_NAME/root/incus-restored-refresh.sh"
+            sudo incus exec "$VM_NAME" -- bash /root/incus-restored-refresh.sh
+          fi
+
+          {
+            echo "restored_vm_name=$VM_NAME"
+            echo "restored_snapshot_id=$SNAPSHOT_ID"
+            echo "restored_release_tag=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "restored_vm_name=$VM_NAME"
+            echo "restored_snapshot_id=$SNAPSHOT_ID"
+            echo "restored_release_tag=$RELEASE_TAG"
+            echo "restored_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > /tmp/incus-restore.txt
+
+      - name: Upload Incus restore artifact
+        if: ${{ steps.incus_restore.outputs.restored_vm_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: incus-restore
+          path: /tmp/incus-restore.txt
+          if-no-files-found: error
+
+      - name: Bootstrap Incus VM on first run
+        id: incus_bootstrap
+        if: ${{ inputs.incus_stateful_vm_name != '' && inputs.incus_stateful_snapshot_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y incus qemu-system-x86 qemu-utils
+
+          if ! sudo test -S /var/lib/incus/unix.socket; then
+            sudo incus admin init --auto
+          fi
+          if ! sudo incus storage show default >/dev/null 2>&1; then
+            sudo incus storage create default dir
+          fi
+          if ! sudo incus network show incusbr0 >/dev/null 2>&1; then
+            sudo incus network create incusbr0 ipv4.address=auto ipv6.address=none
+          fi
+          if ! sudo incus profile device show default | grep -q '^root:'; then
+            sudo incus profile device add default root disk path=/ pool=default
+          fi
+          if ! sudo incus profile device show default | grep -q '^eth0:'; then
+            sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
+          fi
+
+          # Ensure Incus bridge has outbound internet after fresh boot or snapshot restore.
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+          HOST_IFACE="$(ip route show default 0.0.0.0/0 | awk '{print $5; exit}')"
+          if [[ -z "$HOST_IFACE" ]]; then
+            HOST_IFACE="eth0"
+          fi
+          if ! sudo iptables -C FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT
+          fi
+          if ! sudo iptables -C FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          fi
+          if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null; then
+            sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE
+          fi
+          echo "Incus bridge iptables rules configured for $HOST_IFACE"
+
+          VM_NAME="${{ inputs.incus_stateful_vm_name }}"
+
+          if sudo incus info "$VM_NAME" >/dev/null 2>&1; then
+            echo "VM $VM_NAME already exists; skipping bootstrap."
+          else
+            INCUS_BOOTSTRAP_SCRIPT_B64='${{ inputs.incus_bootstrap_script_b64 }}' python3 scripts/write-incus-cloud-init.py
+            sudo incus init images:ubuntu/noble/cloud "$VM_NAME" --vm -c limits.memory=2048MiB -c limits.cpu=2
+            sudo incus config set "$VM_NAME" user.user-data - </tmp/incus-cloud-init.yaml
+            sudo incus config set "$VM_NAME" migration.stateful true
+            sudo incus config device override "$VM_NAME" root size.state=4GiB
+            sudo incus start "$VM_NAME"
+            sleep 45
+          fi
+
+          sudo incus info "$VM_NAME"
+
+          {
+            echo "bootstrapped_vm_name=$VM_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "bootstrapped_vm_name=$VM_NAME"
+            echo "bootstrapped_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > /tmp/incus-bootstrap.txt
+
+      - name: Upload Incus bootstrap artifact
+        if: ${{ steps.incus_bootstrap.outputs.bootstrapped_vm_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: incus-bootstrap
+          path: /tmp/incus-bootstrap.txt
+          if-no-files-found: error
+
+      - name: Upload SSH link as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-link
+          path: /tmp/ssh-link.txt
+          if-no-files-found: error
+
+      - name: Upload SSH status artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-status
+          path: /tmp/ssh-status.txt
+          if-no-files-found: error
+
+      - name: Keep alive
+        run: |
+          SLEEP="${{ inputs.test_sleep_seconds }}"
+          if [[ -z "$SLEEP" ]]; then
+            SLEEP=3600
+          fi
+          echo "Runner alive for $SLEEP seconds..."
+          sleep "$SLEEP"
+
+      - name: Export Incus VM state to release snapshot
+        id: incus_export
+        if: ${{ inputs.incus_stateful_vm_name != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y incus qemu-system-x86 qemu-utils
+
+          if ! sudo test -S /var/lib/incus/unix.socket; then
+            sudo incus admin init --auto
+          fi
+          if ! sudo incus storage show default >/dev/null 2>&1; then
+            sudo incus storage create default dir
+          fi
+          if ! sudo incus network show incusbr0 >/dev/null 2>&1; then
+            sudo incus network create incusbr0 ipv4.address=auto ipv6.address=none
+          fi
+          if ! sudo incus profile device show default | grep -q '^root:'; then
+            sudo incus profile device add default root disk path=/ pool=default
+          fi
+          if ! sudo incus profile device show default | grep -q '^eth0:'; then
+            sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
+          fi
+
+          # Ensure Incus bridge has outbound internet after fresh boot or snapshot restore.
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+          HOST_IFACE="$(ip route show default 0.0.0.0/0 | awk '{print $5; exit}')"
+          if [[ -z "$HOST_IFACE" ]]; then
+            HOST_IFACE="eth0"
+          fi
+          if ! sudo iptables -C FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT
+          fi
+          if ! sudo iptables -C FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          fi
+          if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null; then
+            sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE
+          fi
+          echo "Incus bridge iptables rules configured for $HOST_IFACE"
+
+          VM_NAME="${{ inputs.incus_stateful_vm_name }}"
+          RELEASE_TAG="${{ inputs.incus_stateful_release_tag }}"
+          if [[ -z "$RELEASE_TAG" ]]; then
+            RELEASE_TAG="worker-snapshots"
+          fi
+          SNAPSHOT_ID="${{ inputs.incus_stateful_snapshot_id }}"
+          if [[ -z "$SNAPSHOT_ID" ]]; then
+            SNAPSHOT_ID="${VM_NAME}-stateful-${GITHUB_RUN_ID}"
+          fi
+          SNAPSHOT_PATH="/tmp/${SNAPSHOT_ID}.tar.gz"
+
+          if ! sudo incus info "$VM_NAME" >/dev/null 2>&1; then
+            echo "VM $VM_NAME not present on this runner; skipping stateful export."
+            {
+              echo "snapshot_vm_name="
+              echo "snapshot_id="
+              echo "snapshot_release_tag="
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "snapshot_vm_name=$VM_NAME"
+              echo "snapshot_skipped=missing-vm"
+              echo "snapshot_release_tag=$RELEASE_TAG"
+              echo "checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } > /tmp/incus-export.txt
+            exit 0
+          fi
+
+          sudo incus stop "$VM_NAME" --stateful
+          sudo rm -f "$SNAPSHOT_PATH"
+          sudo touch "$SNAPSHOT_PATH"
+          sudo chmod 666 "$SNAPSHOT_PATH"
+          timeout "${INCUS_EXPORT_TIMEOUT_SECONDS:-300}" sudo incus export "$VM_NAME" "$SNAPSHOT_PATH"
+          [[ -s "$SNAPSHOT_PATH" ]] || { echo "Incus export produced an empty snapshot: $SNAPSHOT_PATH" >&2; exit 1; }
+          sudo chown "$USER:$USER" "$SNAPSHOT_PATH"
+
+          chmod +x scripts/transfer-worker-snapshot-via-release.sh
+          REPO="${GITHUB_REPOSITORY}" RELEASE_TAG="$RELEASE_TAG" \
+            scripts/transfer-worker-snapshot-via-release.sh upload "$SNAPSHOT_PATH" "$SNAPSHOT_ID"
+
+          {
+            echo "snapshot_vm_name=$VM_NAME"
+            echo "snapshot_id=$SNAPSHOT_ID"
+            echo "snapshot_release_tag=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "snapshot_vm_name=$VM_NAME"
+            echo "snapshot_id=$SNAPSHOT_ID"
+            echo "snapshot_release_tag=$RELEASE_TAG"
+            echo "exported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > /tmp/incus-export.txt
+
+      - name: Upload Incus export artifact
+        if: ${{ steps.incus_export.outputs.snapshot_id != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: incus-export
+          path: /tmp/incus-export.txt
+          if-no-files-found: error
+
+      - name: Dispatch successor run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          payload="$(python3 - <<'PY'
+          import json
+
+          payload = {
+              "ref": "${{ github.ref_name }}",
+              "inputs": {
+                  "ssh_public_key": """${{ inputs.ssh_public_key }}""".strip(),
+                  "lolgames_ssh_name": """${{ steps.lolgames_ssh.outputs.host }}""".strip().removesuffix(".agentsweb.space"),
+                  "lolgames_ssh_port": """${{ steps.lolgames_ssh.outputs.port }}""".strip(),
+                  "lolgames_tunnel_prefix": """${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}""".strip(),
+                  "incus_stateful_vm_name": """${{ inputs.incus_stateful_vm_name }}""".strip(),
+                  "incus_stateful_snapshot_id": """${{ steps.incus_export.outputs.snapshot_id }}""".strip(),
+                  "incus_stateful_release_tag": """${{ steps.incus_export.outputs.snapshot_release_tag || inputs.incus_stateful_release_tag }}""".strip(),
+                  "incus_bootstrap_script_b64": """${{ inputs.incus_bootstrap_script_b64 }}""".strip(),
+                  "test_sleep_seconds": """${{ inputs.test_sleep_seconds }}""".strip(),
+              },
+          }
+          print(json.dumps(payload))
+          PY
+          )"
+
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ssh-runner.yml/dispatches" \
+            -d "$payload"
+
+          {
+            echo "dispatched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "host=${{ steps.lolgames_ssh.outputs.host }}"
+            echo "port=${{ steps.lolgames_ssh.outputs.port }}"
+            echo "lolgames_tunnel_prefix=${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}"
+            echo "incus_stateful_vm_name=${{ inputs.incus_stateful_vm_name }}"
+            echo "incus_stateful_snapshot_id=${{ steps.incus_export.outputs.snapshot_id }}"
+            echo "incus_stateful_release_tag=${{ steps.incus_export.outputs.snapshot_release_tag || inputs.incus_stateful_release_tag }}"
+          } > /tmp/ssh-renewal.txt
+
+      - name: Upload renewal status artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-renewal
+          path: /tmp/ssh-renewal.txt
+          if-no-files-found: error
+
+      - name: Handoff grace period
+        run: |
+          echo "Waiting 60s for successor tunnel handoff..."
+          sleep 60
