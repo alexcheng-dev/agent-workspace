@@ -12,7 +12,6 @@ HERMES_WEBUI_GIT_URL="${HERMES_WEBUI_GIT_URL:-https://github.com/nesquena/hermes
 APP_PORT="${APP_PORT:-1456}"
 INSTALL_CHILD_DEPS="${INSTALL_CHILD_DEPS:-0}"
 START_CHILD_AGENTS="${START_CHILD_AGENTS:-0}"
-PUBLISH_CHILD_AGENT_PORTS="${PUBLISH_CHILD_AGENT_PORTS:-0}"
 PROVISION_TRACE="${PROVISION_TRACE:-1}"
 RUN_TOKEN="${RUN_TOKEN:-}"
 TUNNEL_PREFIX="${LOLGAMES_TUNNEL_PREFIX:-$(hostname | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' )-$(date +%s)}"
@@ -146,42 +145,39 @@ write_state_and_emit() {
   trace "capture status + start tunnels"
   curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" > "$status_path"
   local worker_agents_url=""
-  local codex_url=""
-  local opencode_url=""
-  local hermes_url=""
-  local openclaw_url=""
   worker_agents_url="$(start_tunnel worker-agents "$APP_PORT" '/api/status' || true)"
-  if [[ "$PUBLISH_CHILD_AGENT_PORTS" == "1" ]]; then
-    python3 - "$status_path" <<'PY' > "$STATE_DIR/ports.env"
-import json, sys
-agents = {a.get('id'): a for a in json.load(open(sys.argv[1])).get('agents', [])}
-for key, env in [('codex-web-local', 'CODEX_PORT'), ('opencode', 'OPENCODE_PORT'), ('hermes-webui', 'HERMES_PORT'), ('openclaw', 'OPENCLAW_PORT')]:
-    agent = agents.get(key) or {}
-    print(f"{env}={agent.get('port') if agent.get('state') == 'running' else ''}")
-PY
-    # shellcheck disable=SC1090
-    source "$STATE_DIR/ports.env"
-    [[ -n "${CODEX_PORT:-}" ]] && codex_url="$(start_tunnel codex-web-local "$CODEX_PORT" '/' || true)"
-    [[ -n "${OPENCODE_PORT:-}" ]] && opencode_url="$(start_tunnel opencode "$OPENCODE_PORT" '/' || true)"
-    [[ -n "${HERMES_PORT:-}" ]] && hermes_url="$(start_tunnel hermes-webui "$HERMES_PORT" '/' || true)"
-    [[ -n "${OPENCLAW_PORT:-}" ]] && openclaw_url="$(start_tunnel openclaw "$OPENCLAW_PORT" '/' || true)"
-  fi
 
-  python3 - "$status_path" "$worker_agents_url" "$APP_PORT" "$codex_url" "$opencode_url" "$hermes_url" "$openclaw_url" "$(hostname)" "$(read_boot_marker)" <<'PY'
+  python3 - "$status_path" "$worker_agents_url" "$APP_PORT" "$(hostname)" "$(read_boot_marker)" <<'PY'
 import json, os, sys
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
-status_path, worker_agents_url, port, codex_url, opencode_url, hermes_url, openclaw_url, hostname, boot_marker = sys.argv[1:]
+status_path, worker_agents_url, port, hostname, boot_marker = sys.argv[1:]
 try:
     agents = {a.get('id'): a for a in json.load(open(status_path, encoding='utf-8')).get('agents', [])}
 except Exception:
     agents = {}
-if worker_agents_url and not openclaw_url and (agents.get('openclaw') or {}).get('state') == 'running':
+# Child UIs share the Worker Agents hostname; derive each from its own port.
+child_defaults = {'codex-web-local': None, 'opencode': None, 'hermes-webui': None, 'openclaw': 18789}
+codex_url = opencode_url = hermes_url = openclaw_url = ''
+if worker_agents_url:
     parsed = urlsplit(worker_agents_url)
     host = parsed.hostname or ''
     if host:
-        port = ((agents.get('openclaw') or {}).get('port') or 18789)
-        openclaw_url = urlunsplit((parsed.scheme, f"{host}:{port}", '/', '', ''))
+        for child_id in ('codex-web-local', 'opencode', 'hermes-webui', 'openclaw'):
+            agent = agents.get(child_id) or {}
+            if agent.get('state') != 'running':
+                continue
+            child_port = agent.get('port') or child_defaults.get(child_id)
+            if child_port:
+                child_url = urlunsplit((parsed.scheme, f"{host}:{child_port}", '/', '', ''))
+                if child_id == 'codex-web-local':
+                    codex_url = child_url
+                elif child_id == 'opencode':
+                    opencode_url = child_url
+                elif child_id == 'hermes-webui':
+                    hermes_url = child_url
+                else:
+                    openclaw_url = child_url
 state = {
     'status': 'running' if worker_agents_url else 'starting',
     'url': worker_agents_url,
@@ -203,8 +199,15 @@ os.makedirs(state_dir, exist_ok=True)
 with open(os.path.join(state_dir, 'state.json'), 'w', encoding='utf-8') as f:
     json.dump(state, f)
     f.write('\n')
+with open(os.path.join(state_dir, 'child-urls.env'), 'w', encoding='utf-8') as f:
+    f.write(f"codex_url={codex_url}\n")
+    f.write(f"opencode_url={opencode_url}\n")
+    f.write(f"hermes_url={hermes_url}\n")
+    f.write(f"openclaw_url={openclaw_url}\n")
 PY
 
+  # shellcheck disable=SC1090
+  source "$STATE_DIR/child-urls.env" 2>/dev/null || true
   echo "__WORKER_AGENTS_DONE__${RUN_TOKEN}"
   echo "PUBLIC_URL=${worker_agents_url}"
   echo "CODEX_URL=${codex_url}"

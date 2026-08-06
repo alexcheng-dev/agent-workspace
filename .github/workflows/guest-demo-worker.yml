@@ -166,7 +166,6 @@ jobs:
           export TUNNEL_CLIENT_PATH="$GITHUB_WORKSPACE/lolgames_tunnel"
           export START_CHILD_AGENTS=0
           export INSTALL_CHILD_DEPS=0
-          export PUBLISH_CHILD_AGENT_PORTS=0
           export PROVISION_TRACE=1
           export RUN_TOKEN="guest-demo"
           export LOLGAMES_TUNNEL_EXPIRES_AT="$EXPIRES_AT"
