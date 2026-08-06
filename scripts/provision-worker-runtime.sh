@@ -37,7 +37,7 @@ start_tunnel() {
   local log_path="$HOME/${name}-lolgames.log"
   local public_url="http://${public_name}.agentsweb.space:${port}"
   if command -v pkill >/dev/null 2>&1; then
-    pkill -f "[l]olgames_tunnel.*client 127.0.0.1:${port} --server ${LOLGAMES_TUNNEL_SERVER} --name ${public_name} --same-port" 2>/dev/null || true
+    pkill -f "[l]olgames_tunnel.*client 127.0.0.1:${port} --server [^[:space:]]+ --name ${public_name} --same-port" 2>/dev/null || true
   fi
   : > "$log_path"
   local status_file="/tmp/${name}-lolgames-status.json"
