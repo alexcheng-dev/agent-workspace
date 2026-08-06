@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync, execSync } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { config, defaultPath, shellBin } from './config.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTER_GIT_URL = process.env.ROUTER_GIT_URL || 'https://github.com/decolua/9router.git';
 const DEFAULT_HOME = process.env.HOME || process.env.USERPROFILE || (process.getuid?.() === 0 ? '/root' : '/tmp');
 const ROUTER_HOME = process.env.WORKER_AGENTS_9ROUTER_DIR || path.join(DEFAULT_HOME, '9router');
@@ -13,6 +15,7 @@ const ROUTER_PORT = Number.parseInt(process.env.WORKER_AGENTS_9ROUTER_PORT || '2
 const ROUTER_API_KEY = process.env.WORKER_AGENTS_9ROUTER_API_KEY || 'local-dev-key';
 const ROUTER_MODEL = process.env.WORKER_AGENTS_9ROUTER_MODEL || 'opencode/big-pickle';
 const OPEN_ACCESS_PATCH_MARK = 'sshworker: open remote LLM API access when requireApiKey=false';
+const OPEN_ACCESS_PATCH_SCRIPT = path.join(__dirname, '..', 'scripts', 'patch-9router-dashboard-guard.mjs');
 const HF_ENDPOINT_PROVIDER_NAME = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_NAME || 'HF DeepSeek V4 Flash';
 const HF_ENDPOINT_PROVIDER_PREFIX = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_PREFIX || 'hf-free';
 const HF_ENDPOINT_PROVIDER_ID = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_ID || `openai-compatible-chat-${HF_ENDPOINT_PROVIDER_PREFIX}`;
@@ -219,7 +222,10 @@ function patchRouterDashboardGuard(log) {
     return false;
   }
   let source = fs.readFileSync(guardPath, 'utf8');
-  if (source.includes(OPEN_ACCESS_PATCH_MARK)) return false;
+  if (source.includes(OPEN_ACCESS_PATCH_MARK)) {
+    if (log) log('[9router] dashboardGuard.js already open-access patched');
+    return false;
+  }
   const needle = `async function canAccessPublicLlmApi(request) {
   if (isLocalRequest(request)) return true;
   if (await hasValidCliToken(request)) return true;
@@ -379,6 +385,7 @@ function buildBootstrapCommand(port = ROUTER_PORT) {
     `ROUTER_HOME=${shellQuote(ROUTER_HOME)}`,
     `ROUTER_GIT_URL=${shellQuote(ROUTER_GIT_URL)}`,
     `ROUTER_PORT=${shellQuote(port)}`,
+    `PATCH_SCRIPT=${shellQuote(OPEN_ACCESS_PATCH_SCRIPT)}`,
     `DATA_DIR=${shellQuote(dataDir)}`,
     `STANDALONE_DIR=${shellQuote(standaloneDir)}`,
     `STATIC_SRC=${shellQuote(staticSrc)}`,
@@ -390,6 +397,7 @@ function buildBootstrapCommand(port = ROUTER_PORT) {
     '  rm -rf "$ROUTER_HOME"',
     '  git clone --depth 1 "$ROUTER_GIT_URL" "$ROUTER_HOME"',
     '  echo "[9router] Clone complete"',
+    '  node "$PATCH_SCRIPT" "$ROUTER_HOME" || echo "[9router] dashboardGuard open-access patch skipped"',
     'else',
     '  echo "[9router] Repo already exists"',
     'fi',
@@ -872,4 +880,4 @@ export async function stop(log) {
   return getStatus();
 }
 
-export { ROUTER_PORT, ROUTER_API_KEY, ROUTER_MODEL };
+export { ROUTER_PORT, ROUTER_API_KEY, ROUTER_MODEL, patchRouterDashboardGuard };
