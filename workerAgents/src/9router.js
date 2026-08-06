@@ -339,12 +339,14 @@ function buildBootstrapCommand(port = ROUTER_PORT) {
   const staticDst = path.join(standaloneDir, '.next', 'static');
   const publicSrc = path.join(ROUTER_HOME, 'public');
   const publicDst = path.join(standaloneDir, 'public');
+  const dataDir = path.join(process.env.HOME || '/tmp', '.9router', 'data');
   return [
     'set -e',
     `export PATH=${shellQuote(defaultPath)}`,
     `ROUTER_HOME=${shellQuote(ROUTER_HOME)}`,
     `ROUTER_GIT_URL=${shellQuote(ROUTER_GIT_URL)}`,
     `ROUTER_PORT=${shellQuote(port)}`,
+    `DATA_DIR=${shellQuote(dataDir)}`,
     `STANDALONE_DIR=${shellQuote(standaloneDir)}`,
     `STATIC_SRC=${shellQuote(staticSrc)}`,
     `STATIC_DST=${shellQuote(staticDst)}`,
@@ -362,7 +364,7 @@ function buildBootstrapCommand(port = ROUTER_PORT) {
     '  echo "[9router] Building..."',
     '  cd "$ROUTER_HOME"',
     '  npm install',
-    '  npm run build',
+    '  DATA_DIR="$DATA_DIR" npm run build',
     '  echo "[9router] Build complete"',
     'else',
     '  echo "[9router] Already built"',
@@ -491,8 +493,12 @@ async function doEnsureHfEndpointProvider(log) {
   const dataDirCandidates = [
     process.env.DATA_DIR,
     process.env.HOME ? path.join(process.env.HOME, '.9router', 'data') : '',
+    process.env.HOME ? path.join(process.env.HOME, '.9router') : '',
     process.env.USERPROFILE ? path.join(process.env.USERPROFILE, '.9router', 'data') : '',
+    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, '.9router') : '',
+    '/root/.9router',
     '/root/.9router/data',
+    '/tmp/.9router',
     path.join('/tmp', '.9router', 'data'),
   ].filter(Boolean);
   const dbCandidates = dataDirCandidates.map((dataDir) => path.join(dataDir, 'db', 'data.sqlite'));
