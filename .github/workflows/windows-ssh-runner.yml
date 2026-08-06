@@ -73,7 +73,7 @@ jobs:
           $tunnelPrefix = '${{ inputs.lolgames_tunnel_prefix }}'
 
           $logPath = "$env:RUNNER_TEMP\lolgames-ssh\tunnel.log"
-          $args = @('-m','lolgames_tunnel','client','127.0.0.1:22','--server','161.153.109.33','--name',$publicName,'--public-port',$publicPort)
+          $args = @('-m','lolgames_tunnel','client','127.0.0.1:22','--server','agentsweb.space','--name',$publicName,'--public-port',$publicPort)
           $env:PYTHONPATH = $env:GITHUB_WORKSPACE
           $proc = Start-Process -FilePath python -ArgumentList $args -RedirectStandardOutput $logPath -RedirectStandardError "$env:RUNNER_TEMP\lolgames-ssh\tunnel.err" -PassThru
           for ($i = 0; $i -lt 30; $i++) {

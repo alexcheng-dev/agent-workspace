@@ -94,7 +94,7 @@ jobs:
           TUNNEL_PREFIX="${{ inputs.lolgames_tunnel_prefix }}"
 
           nohup env PYTHONPATH="$GITHUB_WORKSPACE" python3 -m lolgames_tunnel client 127.0.0.1:2222 \
-            --server 161.153.109.33 \
+            --server agentsweb.space \
             --name "$PUBLIC_NAME" \
             --public-port "$PUBLIC_PORT" \
             > /tmp/lolgames-ssh/tunnel.log 2>&1 &
