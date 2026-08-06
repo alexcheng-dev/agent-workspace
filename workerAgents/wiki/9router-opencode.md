@@ -28,7 +28,7 @@ Quick probe:
 curl -sS http://127.0.0.1:20127/v1/models
 ```
 
-Worker Agents seeds a no-key OpenAI-compatible Hugging Face endpoint into 9Router after health checks:
+Worker Agents seeds a no-key OpenAI-compatible Hugging Face endpoint into 9Router after health checks. The seed writes both `settings.requireLogin=false` and `settings.requireApiKey=false` (9Router 0.5.50 added `requireApiKey` as a separate gate, so disabling only `requireLogin` leaves chat and `/v1` returning `401` without a key):
 
 - Provider prefix: `hf-free`
 - Model: `hf-free/deepseek-ai/DeepSeek-V4-Flash-0731`
