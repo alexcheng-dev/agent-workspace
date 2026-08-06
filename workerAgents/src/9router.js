@@ -511,7 +511,7 @@ async function doEnsureHfEndpointProvider(log) {
     const candidate = dbCandidates.find((path) => fs.existsSync(path));
     if (candidate) {
       try {
-        ensureDashboardNoLogin(candidate);
+        ensureOpenAccess(candidate);
         dbPath = candidate;
       } catch (error) {
         dbError = error.message;
@@ -632,7 +632,7 @@ db.close();
   return true;
 }
 
-function ensureDashboardNoLogin(dbPath) {
+function ensureOpenAccess(dbPath) {
   const routerPackagePath = findRouterPackagePath();
   const settingsScript = `
 const { createRequire } = require('node:module');
@@ -645,12 +645,22 @@ const row = db.prepare('select data from settings where id = 1').get();
 const data = row?.data ? JSON.parse(row.data) : {};
 if (data.requireLogin !== false) {
   data.requireLogin = false;
-  db.prepare('insert into settings(id, data) values(1, ?) on conflict(id) do update set data = excluded.data').run(JSON.stringify(data));
   changed = true;
 }
+if (data.requireApiKey !== false) {
+  data.requireApiKey = false;
+  changed = true;
+}
+if (changed) {
+  db.prepare('insert into settings(id, data) values(1, ?) on conflict(id) do update set data = excluded.data').run(JSON.stringify(data));
+}
 const verified = db.prepare('select data from settings where id = 1').get();
-if (JSON.parse(verified?.data || '{}').requireLogin !== false) {
+const verifiedData = JSON.parse(verified?.data || '{}');
+if (verifiedData.requireLogin !== false) {
   throw new Error('9Router requireLogin setting did not persist');
+}
+if (verifiedData.requireApiKey !== false) {
+  throw new Error('9Router requireApiKey setting did not persist');
 }
 db.close();
 process.stdout.write(changed ? 'changed' : 'unchanged');
