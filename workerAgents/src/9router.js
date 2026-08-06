@@ -633,6 +633,7 @@ const { createRequire } = require('node:module');
 const requireFromRouter = createRequire(process.argv[1]);
 const Database = requireFromRouter('better-sqlite3');
 const db = new Database(process.argv[2]);
+db.pragma('busy_timeout = 10000');
 let changed = false;
 const row = db.prepare('select data from settings where id = 1').get();
 const data = row?.data ? JSON.parse(row.data) : {};
@@ -640,6 +641,10 @@ if (data.requireLogin !== false) {
   data.requireLogin = false;
   db.prepare('insert into settings(id, data) values(1, ?) on conflict(id) do update set data = excluded.data').run(JSON.stringify(data));
   changed = true;
+}
+const verified = db.prepare('select data from settings where id = 1').get();
+if (JSON.parse(verified?.data || '{}').requireLogin !== false) {
+  throw new Error('9Router requireLogin setting did not persist');
 }
 db.close();
 process.stdout.write(changed ? 'changed' : 'unchanged');
