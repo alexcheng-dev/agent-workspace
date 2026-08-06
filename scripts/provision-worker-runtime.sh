@@ -8,6 +8,7 @@ WORKER_ARCHIVE_PATH="${WORKER_ARCHIVE_PATH:-}"
 WORKER_APP_SOURCE_DIR="${WORKER_APP_SOURCE_DIR:-}"
 WORKER_AGENTS_GIT_URL="${WORKER_AGENTS_GIT_URL:-}"
 TUNNEL_CLIENT_PATH="${TUNNEL_CLIENT_PATH:-/tmp/lolgames_tunnel}"
+LOLGAMES_TUNNEL_SERVER="${LOLGAMES_TUNNEL_SERVER:-agentsweb.space}"
 HERMES_WEBUI_GIT_URL="${HERMES_WEBUI_GIT_URL:-https://github.com/nesquena/hermes-webui.git}"
 APP_PORT="${APP_PORT:-1456}"
 INSTALL_CHILD_DEPS="${INSTALL_CHILD_DEPS:-0}"
@@ -36,7 +37,7 @@ start_tunnel() {
   local log_path="$HOME/${name}-lolgames.log"
   local public_url="http://${public_name}.agentsweb.space:${port}"
   if command -v pkill >/dev/null 2>&1; then
-    pkill -f "[l]olgames_tunnel.*client 127.0.0.1:${port} --server 161.153.109.33 --name ${public_name} --same-port" 2>/dev/null || true
+    pkill -f "[l]olgames_tunnel.*client 127.0.0.1:${port} --server ${LOLGAMES_TUNNEL_SERVER} --name ${public_name} --same-port" 2>/dev/null || true
   fi
   : > "$log_path"
   local status_file="/tmp/${name}-lolgames-status.json"
@@ -47,9 +48,9 @@ start_tunnel() {
     status_args=(--status-http "$status_http")
   fi
   if [[ -d "$TUNNEL_CLIENT_PATH" ]]; then
-    nohup env PYTHONPATH="$(dirname "$TUNNEL_CLIENT_PATH")" python3 -m "$(basename "$TUNNEL_CLIENT_PATH")" client "127.0.0.1:${port}" --server 161.153.109.33 --name "$public_name" --same-port --status-file "$status_file" "${status_args[@]}" > "$log_path" 2>&1 </dev/null &
+    nohup env PYTHONPATH="$(dirname "$TUNNEL_CLIENT_PATH")" python3 -m "$(basename "$TUNNEL_CLIENT_PATH")" client "127.0.0.1:${port}" --server "$LOLGAMES_TUNNEL_SERVER" --name "$public_name" --same-port --status-file "$status_file" "${status_args[@]}" > "$log_path" 2>&1 </dev/null &
   else
-    nohup python3 "$TUNNEL_CLIENT_PATH" client "127.0.0.1:${port}" --server 161.153.109.33 --name "$public_name" --same-port --status-file "$status_file" "${status_args[@]}" > "$log_path" 2>&1 </dev/null &
+    nohup python3 "$TUNNEL_CLIENT_PATH" client "127.0.0.1:${port}" --server "$LOLGAMES_TUNNEL_SERVER" --name "$public_name" --same-port --status-file "$status_file" "${status_args[@]}" > "$log_path" 2>&1 </dev/null &
   fi
   for _ in $(seq 1 30); do
     if grep -Fq "$public_url" "$log_path" 2>/dev/null; then
