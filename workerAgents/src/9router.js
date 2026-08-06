@@ -12,6 +12,7 @@ const ROUTER_LOG_PATH = '/tmp/9router.log';
 const ROUTER_PORT = Number.parseInt(process.env.WORKER_AGENTS_9ROUTER_PORT || '20127', 10);
 const ROUTER_API_KEY = process.env.WORKER_AGENTS_9ROUTER_API_KEY || 'local-dev-key';
 const ROUTER_MODEL = process.env.WORKER_AGENTS_9ROUTER_MODEL || 'opencode/big-pickle';
+const OPEN_ACCESS_PATCH_MARK = 'sshworker: open remote LLM API access when requireApiKey=false';
 const HF_ENDPOINT_PROVIDER_NAME = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_NAME || 'HF DeepSeek V4 Flash';
 const HF_ENDPOINT_PROVIDER_PREFIX = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_PREFIX || 'hf-free';
 const HF_ENDPOINT_PROVIDER_ID = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_ID || `openai-compatible-chat-${HF_ENDPOINT_PROVIDER_PREFIX}`;
@@ -207,6 +208,37 @@ async function ensureRepo(log) {
     });
   }
   if (log) log('[9router] Clone complete');
+  patchRouterDashboardGuard(log);
+  return true;
+}
+
+function patchRouterDashboardGuard(log) {
+  const guardPath = path.join(ROUTER_HOME, 'src', 'dashboardGuard.js');
+  if (!fs.existsSync(guardPath)) {
+    if (log) log('[9router] dashboardGuard.js not found, skipping open-access patch');
+    return false;
+  }
+  let source = fs.readFileSync(guardPath, 'utf8');
+  if (source.includes(OPEN_ACCESS_PATCH_MARK)) return false;
+  const needle = `async function canAccessPublicLlmApi(request) {
+  if (isLocalRequest(request)) return true;
+  if (await hasValidCliToken(request)) return true;
+  return await hasValidApiKey(request);
+}`;
+  if (!source.includes(needle)) {
+    if (log) log('[9router] canAccessPublicLlmApi shape changed, skipping open-access patch');
+    return false;
+  }
+  const replacement = `async function canAccessPublicLlmApi(request) {
+  if (isLocalRequest(request)) return true;
+  if (await hasValidCliToken(request)) return true;
+  // ${OPEN_ACCESS_PATCH_MARK}
+  const settings = await loadSettings();
+  if (settings && settings.requireApiKey === false) return true;
+  return await hasValidApiKey(request);
+}`;
+  fs.writeFileSync(guardPath, source.replace(needle, replacement));
+  if (log) log('[9router] Patched dashboardGuard.js for open remote API access');
   return true;
 }
 
@@ -216,6 +248,7 @@ async function ensureBuilt(log) {
     if (log) log('[9router] Already built');
     return false;
   }
+  patchRouterDashboardGuard(log);
   if (fs.existsSync(path.join(ROUTER_HOME, '.next'))) {
     if (log) log('[9router] Incomplete build output detected, cleaning .next before rebuild...');
     clearRouterBuildOutput();
