@@ -12,10 +12,11 @@ if (!routerHome) {
 // ROUTER_HOME is read from the environment at module load, so set it first.
 process.env.WORKER_AGENTS_9ROUTER_DIR = routerHome;
 
-const { patchRouterDashboardGuard } = await import('../src/9router.js');
+const { patchRouterDashboardGuard, patchRouterMiddleware } = await import('../src/9router.js');
 
 try {
   patchRouterDashboardGuard((message) => console.log(message));
+  patchRouterMiddleware((message) => console.log(message));
 } catch (error) {
   console.error(`[9router] dashboardGuard open-access patch failed: ${error.message}`);
   process.exit(1);

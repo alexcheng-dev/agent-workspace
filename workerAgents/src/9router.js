@@ -226,6 +226,50 @@ function patchRouterDashboardGuard(log) {
   return true;
 }
 
+function routerMiddlewareCandidates() {
+  const roots = new Set([ROUTER_HOME]);
+  for (const pkgJson of npmGlobalPackageCandidates()) {
+    roots.add(path.dirname(pkgJson));
+  }
+  const relativePaths = [
+    path.join('app', '.next-cli-build', 'server', 'middleware.js'),
+    path.join('.next', 'server', 'middleware.js'),
+  ];
+  const candidates = [];
+  for (const root of roots) {
+    for (const relative of relativePaths) {
+      candidates.push(path.join(root, relative));
+    }
+  }
+  return candidates;
+}
+
+function patchRouterMiddleware(log) {
+  const middlewarePath = routerMiddlewareCandidates().find((candidate) => fs.existsSync(candidate));
+  if (!middlewarePath) {
+    if (log) log('[9router] compiled middleware.js not found, skipping open-access middleware patch');
+    return false;
+  }
+  let source = fs.readFileSync(middlewarePath, 'utf8');
+  if (source.includes('openApiKeyAccess.requireApiKey!==false')) {
+    if (log) log('[9router] middleware.js already open-access patched');
+    return false;
+  }
+  const settingsReader = source.match(/async function ([A-Za-z_$][\w$]*)\(\)\{try\{return await \(0,[A-Za-z_$][\w$]*\.getSettings\)\(\)\}catch\{return null\}\}/);
+  const remoteGuard = source.match(/if\(([A-Za-z_$][\w$]*)\(b\)\)return await ([A-Za-z_$][\w$]*)\(a\)\?i\.NextResponse\.next\(\):i\.NextResponse\.json\(\{error:"API key required for remote API access"\},\{status:401\}\);/);
+  if (!settingsReader || !remoteGuard) {
+    if (log) log('[9router] middleware guard shape changed, skipping open-access middleware patch');
+    return false;
+  }
+  const settingsFn = settingsReader[1];
+  const pathFn = remoteGuard[1];
+  const keyFn = remoteGuard[2];
+  const replacement = `if(${pathFn}(b)){const openApiKeyAccess=await ${settingsFn}();if(!openApiKeyAccess||openApiKeyAccess.requireApiKey!==false)return await ${keyFn}(a)?i.NextResponse.next():i.NextResponse.json({error:"API key required for remote API access"},{status:401});}`;
+  fs.writeFileSync(middlewarePath, source.replace(remoteGuard[0], replacement));
+  if (log) log('[9router] Patched middleware.js for open remote API access');
+  return true;
+}
+
 async function ensureBuilt(log) {
   const standaloneServer = path.join(ROUTER_HOME, '.next', 'standalone', 'server.js');
   if (fs.existsSync(standaloneServer) || hasCompleteRouterBuild()) {
@@ -254,6 +298,7 @@ async function ensureBuilt(log) {
     });
   }
   if (log) log('[9router] Build complete');
+  patchRouterMiddleware(log);
   if (!fs.existsSync(standaloneServer) && !hasCompleteRouterBuild()) {
     throw new Error('9Router build finished without a complete Next build output');
   }
@@ -650,6 +695,7 @@ export async function start(log) {
   if (live && live > 0) {
     startupState = 'running';
     startupError = '';
+    patchRouterMiddleware(log);
     ensureOpenAccessSettings(log);
     return getStatus();
   }
@@ -786,4 +832,4 @@ export async function stop(log) {
   return getStatus();
 }
 
-export { ROUTER_PORT, ROUTER_API_KEY, ROUTER_MODEL, patchRouterDashboardGuard };
+export { ROUTER_PORT, ROUTER_API_KEY, ROUTER_MODEL, patchRouterDashboardGuard, patchRouterMiddleware };
