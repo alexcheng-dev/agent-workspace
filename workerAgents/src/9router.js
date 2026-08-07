@@ -18,9 +18,15 @@ const OPEN_ACCESS_PATCH_MARK = 'sshworker: open remote LLM API access when requi
 const OPEN_ACCESS_PATCH_SCRIPT = path.join(__dirname, '..', 'scripts', 'patch-9router-dashboard-guard.mjs');
 const HEALTH_TIMEOUT_MS = Number.parseInt(process.env.ROUTER_HEALTH_TIMEOUT_MS || '120000', 10);
 const HEALTH_POLL_MS = 2000;
+const ROUTER_WATCHDOG_INTERVAL_MS = Number.parseInt(process.env.ROUTER_WATCHDOG_INTERVAL_MS || '30000', 10);
+const ROUTER_WATCHDOG_COOLDOWN_MS = Number.parseInt(process.env.ROUTER_WATCHDOG_COOLDOWN_MS || '60000', 10);
+const ROUTER_WATCHDOG_MAX_BACKOFF = 4;
 let startupPromise = null;
 let startupState = 'idle';
 let startupError = '';
+let watchdogTimer = null;
+let watchdogLastRestartAt = 0;
+let watchdogFailures = 0;
 
 
 function nextBuildArtifacts() {
@@ -720,6 +726,58 @@ export async function stop(log) {
     else log('[9router] Already stopped');
   }
   return getStatus();
+}
+
+function watchdogCooldown() {
+  const backoff = Math.min(watchdogFailures, ROUTER_WATCHDOG_MAX_BACKOFF);
+  return ROUTER_WATCHDOG_COOLDOWN_MS * 2 ** backoff;
+}
+
+function watchdogTick() {
+  if (findListenerForPort(ROUTER_PORT)) {
+    if (watchdogFailures > 0) {
+      watchdogFailures = 0;
+      console.log(`[9router] Watchdog: listener recovered on port ${ROUTER_PORT}`);
+    }
+    return;
+  }
+  if (startupPromise || startupState === 'installing' || startupState === 'starting' || startupState === 'stopped') return;
+  if (Date.now() - watchdogLastRestartAt < watchdogCooldown()) return;
+  watchdogLastRestartAt = Date.now();
+  console.log(`[9router] Watchdog: no listener on port ${ROUTER_PORT}, restarting`);
+  restart(console.log).then((status) => {
+    if (status.livePort) {
+      watchdogFailures = 0;
+      console.log(`[9router] Watchdog: recovered on port ${ROUTER_PORT}`);
+    } else {
+      watchdogFailures += 1;
+      console.warn(`[9router] Watchdog: restart attempt ${watchdogFailures} did not produce a listener`);
+    }
+  }).catch((error) => {
+    watchdogFailures += 1;
+    console.warn(`[9router] Watchdog: restart failed: ${error.message}`);
+  });
+}
+
+export function enableWatchdog(log = console.log) {
+  if (watchdogTimer) return watchdogTimer;
+  watchdogTimer = setInterval(() => {
+    try {
+      watchdogTick();
+    } catch (error) {
+      log(`[9router] Watchdog tick error: ${error.message}`);
+    }
+  }, ROUTER_WATCHDOG_INTERVAL_MS);
+  watchdogTimer.unref?.();
+  log(`[9router] Watchdog enabled (interval ${ROUTER_WATCHDOG_INTERVAL_MS}ms, cooldown ${ROUTER_WATCHDOG_COOLDOWN_MS}ms)`);
+  return watchdogTimer;
+}
+
+export function disableWatchdog() {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
 }
 
 export { ROUTER_PORT, ROUTER_API_KEY, ROUTER_MODEL, patchRouterDashboardGuard };

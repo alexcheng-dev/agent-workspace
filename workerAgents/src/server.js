@@ -434,6 +434,7 @@ try {
   runSetup().catch((error) => {
     console.error('[setup] Preflight error:', error.message);
   }).then(() => {
+  nineRouter.enableWatchdog();
   nineRouter.start(console.log).then((routerStatus) => {
     if (routerStatus.state === 'error' && !routerStatus.livePort) {
       console.warn('[9router] Background startup did not produce a live listener');
