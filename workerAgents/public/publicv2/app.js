@@ -147,7 +147,7 @@ function updateMetrics(agents) {
 
 function updateAuth(auth, router) {
   const codexNote = auth.loggedIn ? ' Legacy Codex credentials are present.' : '';
-  const livePort = router?.livePort || router?.configuredPort || 20127;
+  const livePort = router?.livePort || router?.configuredPort || 20128;
   const routerState = router?.state || 'unknown';
   const host = window.location.hostname || 'localhost';
   if (authTitle) authTitle.textContent = `Providers · 9Router ${routerState}`;

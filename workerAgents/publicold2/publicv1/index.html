@@ -38,7 +38,7 @@
         </header>
 
         <section class="shot-tools">
-          <article class="auth-strip" id="authPanel"><div><p class="eyebrow">9Router</p><h2 id="authTitle">Provider dashboard</h2><p class="muted" id="authDetail">Optional provider dashboard for workers that use 9Router.</p></div><div class="actions"><a class="button primary" id="providersLink" href="http://localhost:20127/dashboard/providers" target="_blank" rel="noreferrer">Providers</a></div></article>
+          <article class="auth-strip" id="authPanel"><div><p class="eyebrow">9Router</p><h2 id="authTitle">Provider dashboard</h2><p class="muted" id="authDetail">Optional provider dashboard for workers that use 9Router.</p></div><div class="actions"><a class="button primary" id="providersLink" href="http://localhost:20128/dashboard/providers" target="_blank" rel="noreferrer">Providers</a></div></article>
           <article class="auth-strip" id="skillsPanel"><div><p class="eyebrow">Skills</p><h2>Worker Skills</h2><p class="muted" id="skillsDetail">Optional helper sync for worker environments.</p></div><div class="actions"><button class="button primary" id="updateSkillsBtn" type="button">Update Skills</button></div></article>
         </section>
 
@@ -128,7 +128,7 @@ function loadTheme() {
 
 function updateAuth(auth, router) {
   const codexNote = auth.loggedIn ? ' Legacy Codex credentials are present.' : '';
-  const livePort = router?.livePort || router?.configuredPort || 20127;
+  const livePort = router?.livePort || router?.configuredPort || 20128;
   const state = router?.state || 'unknown';
   const host = window.location.hostname || 'localhost';
   authTitle.textContent = `9Router ${state}`;

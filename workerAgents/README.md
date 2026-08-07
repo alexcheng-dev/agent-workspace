@@ -26,7 +26,7 @@ For a clean local 9Router bootstrap from scratch:
 npm run start:clean-9router
 ```
 
-That command also kills any stale local listener on port `20127` first, so an old deleted 9Router process cannot keep serving broken `500` responses.
+That command also kills any stale local listener on port `20128` first, so an old deleted 9Router process cannot keep serving broken `500` responses.
 
 For a clean local OpenCode reinstall/bootstrap from scratch:
 
@@ -42,7 +42,7 @@ For a clean local reset of both 9Router and OpenCode before boot:
 npm run start:clean-all
 ```
 
-That command kills stale listeners on ports `20127` and `18924`, removes local 9Router/OpenCode state, uninstalls the global `opencode-ai` package, and then starts Worker Agents.
+That command kills stale listeners on ports `20128` and `18924`, removes local 9Router/OpenCode state, uninstalls the global `opencode-ai` package, and then starts Worker Agents.
 
 
 ## Windows quick start
@@ -123,9 +123,9 @@ AGENT_CMD_HERMES_WEBUI='hermes-webui --host 0.0.0.0 {port}' npm start
 AGENT_CMD_FILEBROWSER='cd ./filebrowser && PORT={port} node server.js' npm start
 ```
 
-OpenWork is cloned from `https://github.com/different-ai/openwork` on first start and runs `pnpm dev:headless-web` with OpenCode/OpenAI environment pointed at the local 9Router API (`http://127.0.0.1:20127/v1`). For public worker tunnels, Worker Agents also passes the current `*.agentsweb.space` host as `OPENWORK_PUBLIC_HOST`/`VITE_ALLOWED_HOSTS` so Vite serves the tunneled URL.
+OpenWork is cloned from `https://github.com/different-ai/openwork` on first start and runs `pnpm dev:headless-web` with OpenCode/OpenAI environment pointed at the local 9Router API (`http://127.0.0.1:20128/v1`). For public worker tunnels, Worker Agents also passes the current `*.agentsweb.space` host as `OPENWORK_PUBLIC_HOST`/`VITE_ALLOWED_HOSTS` so Vite serves the tunneled URL.
 
-Agent Zero is cloned from `https://github.com/agent0ai/agent-zero`, runs directly from a local Python virtualenv with `python run_ui.py`, stores persistent state in `~/agent-zero-usr`, and writes a `_model_config` preset that points chat and utility models at 9Router through `http://127.0.0.1:20127/v1` with the default `opencode/big-pickle` model. Worker Agents does not run Agent Zero in Docker.
+Agent Zero is cloned from `https://github.com/agent0ai/agent-zero`, runs directly from a local Python virtualenv with `python run_ui.py`, stores persistent state in `~/agent-zero-usr`, and writes a `_model_config` preset that points chat and utility models at 9Router through `http://127.0.0.1:20128/v1` with the default `opencode/big-pickle` model. Worker Agents does not run Agent Zero in Docker.
 
 OpenClaw is exposed through the console proxy at `/proxy/openclaw/` so the browser talks to the Worker Agents origin while the upstream gateway sees `localhost`.
 

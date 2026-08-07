@@ -96,7 +96,7 @@ npm install
 
 if ($CleanAll -or $Clean9Router) {
   Write-Host '[setup] Cleaning 9Router state...'
-  Stop-Port 20127
+  Stop-Port 20128
   Remove-Item -Recurse -Force "$HOME\9router", "$HOME\.9router", "$env:TEMP\9router.log" -ErrorAction SilentlyContinue
   Remove-Item -Force 'C:\tmp\9router.log' -ErrorAction SilentlyContinue
 }

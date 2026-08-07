@@ -118,8 +118,8 @@ function psSingleQuote(value) {
 }
 
 function routerPort() {
-  const value = Number.parseInt(process.env.WORKER_AGENTS_9ROUTER_PORT || '20127', 10);
-  return Number.isFinite(value) ? value : 20127;
+  const value = Number.parseInt(process.env.WORKER_AGENTS_9ROUTER_PORT || '20128', 10);
+  return Number.isFinite(value) ? value : 20128;
 }
 
 function routerBaseUrl() {

@@ -47,7 +47,7 @@ function actionLinkAttrs(agent, canOpen, extra = '') {
 
 function updateAuth(auth, router) {
   const codexNote = auth.loggedIn ? ' Legacy Codex credentials are present.' : '';
-  const livePort = router?.livePort || router?.configuredPort || 20127;
+  const livePort = router?.livePort || router?.configuredPort || 20128;
   const state = router?.state || 'unknown';
   const host = window.location.hostname || 'localhost';
   authTitle.textContent = `9Router ${state}`;

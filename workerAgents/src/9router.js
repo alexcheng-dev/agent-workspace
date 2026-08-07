@@ -11,22 +11,19 @@ const ROUTER_GIT_URL = process.env.ROUTER_GIT_URL || 'https://github.com/decolua
 const DEFAULT_HOME = process.env.HOME || process.env.USERPROFILE || (process.getuid?.() === 0 ? '/root' : '/tmp');
 const ROUTER_HOME = process.env.WORKER_AGENTS_9ROUTER_DIR || path.join(DEFAULT_HOME, '9router');
 const ROUTER_LOG_PATH = '/tmp/9router.log';
-const ROUTER_PORT = Number.parseInt(process.env.WORKER_AGENTS_9ROUTER_PORT || '20127', 10);
+const ROUTER_PORT = Number.parseInt(process.env.WORKER_AGENTS_9ROUTER_PORT || '20128', 10);
 const ROUTER_API_KEY = process.env.WORKER_AGENTS_9ROUTER_API_KEY || 'local-dev-key';
 const ROUTER_MODEL = process.env.WORKER_AGENTS_9ROUTER_MODEL || 'opencode/big-pickle';
 const OPEN_ACCESS_PATCH_MARK = 'sshworker: open remote LLM API access when requireApiKey=false';
 const OPEN_ACCESS_PATCH_SCRIPT = path.join(__dirname, '..', 'scripts', 'patch-9router-dashboard-guard.mjs');
 const HEALTH_TIMEOUT_MS = Number.parseInt(process.env.ROUTER_HEALTH_TIMEOUT_MS || '120000', 10);
 const HEALTH_POLL_MS = 2000;
-const ROUTER_WATCHDOG_INTERVAL_MS = Number.parseInt(process.env.ROUTER_WATCHDOG_INTERVAL_MS || '30000', 10);
-const ROUTER_WATCHDOG_COOLDOWN_MS = Number.parseInt(process.env.ROUTER_WATCHDOG_COOLDOWN_MS || '60000', 10);
-const ROUTER_WATCHDOG_MAX_BACKOFF = 4;
+const OPEN_ACCESS_RETRY_MS = Number.parseInt(process.env.ROUTER_OPEN_ACCESS_RETRY_MS || '600000', 10);
+const OPEN_ACCESS_RETRY_STEP_MS = 10000;
 let startupPromise = null;
 let startupState = 'idle';
 let startupError = '';
-let watchdogTimer = null;
-let watchdogLastRestartAt = 0;
-let watchdogFailures = 0;
+let openAccessLoopRunning = false;
 
 
 function nextBuildArtifacts() {
@@ -82,6 +79,7 @@ function execPowerShellStrict(command) {
 
 function findRouterPackagePath() {
   const candidates = [
+    ...npmGlobalPackageCandidates(),
     path.join(DEFAULT_HOME, '.local', 'lib', 'node_modules', '9router'),
     '/usr/local/lib/node_modules/9router',
     '/usr/lib/node_modules/9router',
@@ -98,6 +96,30 @@ function findRouterPackagePath() {
     throw new Error(`9Router package.json not found in ${candidates.join(', ')}`);
   }
   return packagePath;
+}
+
+function npmGlobalPackageCandidates() {
+  const roots = new Set();
+  const npmRoot = execText('npm root -g 2>/dev/null').trim();
+  if (npmRoot) roots.add(npmRoot);
+  if (process.env.NPM_CONFIG_PREFIX) {
+    roots.add(path.join(process.env.NPM_CONFIG_PREFIX, 'lib', 'node_modules'));
+  }
+  for (const root of ['/opt/hostedtoolcache/node', '/usr/local/share/nvm/versions/node', '/usr/local/Cellar/node']) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      for (const lib of ['x64/lib/node_modules', 'lib/node_modules']) {
+        roots.add(path.join(root, entry.name, lib));
+      }
+    }
+  }
+  return [...roots].map((root) => path.join(root, '9router', 'package.json'));
 }
 
 function findListenerForPort(port) {
@@ -168,8 +190,12 @@ async function ensureRepo(log) {
 }
 
 function patchRouterDashboardGuard(log) {
-  const guardPath = path.join(ROUTER_HOME, 'src', 'dashboardGuard.js');
-  if (!fs.existsSync(guardPath)) {
+  const guardCandidates = [
+    path.join(ROUTER_HOME, 'src', 'dashboardGuard.js'),
+    path.join(ROUTER_HOME, 'app', 'dashboardGuard.js'),
+  ];
+  const guardPath = guardCandidates.find((candidate) => fs.existsSync(candidate));
+  if (!guardPath) {
     if (log) log('[9router] dashboardGuard.js not found, skipping open-access patch');
     return false;
   }
@@ -371,6 +397,8 @@ function buildBootstrapCommand(port = ROUTER_PORT) {
     '  fi',
     'fi',
     'if command -v 9router >/dev/null 2>&1; then',
+    '  NPM_ROUTER_HOME="$(npm root -g 2>/dev/null)/9router"',
+    '  if [ -d "$NPM_ROUTER_HOME" ]; then node "$PATCH_SCRIPT" "$NPM_ROUTER_HOME" || echo "[9router] npm 9router open-access patch skipped"; fi',
     '  ROUTER_SERVER="$(npm root -g 2>/dev/null)/9router/app/server.js"',
     '  if [ ! -f "$ROUTER_SERVER" ]; then ROUTER_SERVER="$STANDALONE_DIR/server.js"; fi',
     'else',
@@ -579,16 +607,50 @@ process.stdout.write(changed ? 'changed' : 'unchanged');
   return result === 'changed';
 }
 
+async function probeRouterDatabase(log) {
+  // 9Router creates its SQLite DB lazily on the first request that loads
+  // settings, so touch the dashboard locally before the open-access seed.
+  try {
+    const response = await fetch(`http://127.0.0.1:${ROUTER_PORT}/dashboard`, {
+      signal: AbortSignal.timeout(5000),
+      redirect: 'manual',
+    });
+    if (log) log(`[9router] Dashboard DB probe: HTTP ${response.status}`);
+  } catch (error) {
+    if (log) log(`[9router] Dashboard DB probe failed: ${error.message}`);
+  }
+}
+
+function ensureOpenAccessSettings(log) {
+  if (openAccessLoopRunning) return;
+  openAccessLoopRunning = true;
+  (async () => {
+    try {
+      const deadline = Date.now() + OPEN_ACCESS_RETRY_MS;
+      while (Date.now() < deadline) {
+        try {
+          await probeRouterDatabase(log);
+          await applyOpenAccessSettings(log);
+          if (log) log('[9router] Open API access settings applied');
+          return;
+        } catch (error) {
+          if (log) log(`[9router] Open access settings not applied yet: ${error.message}`);
+          await new Promise((resolve) => setTimeout(resolve, OPEN_ACCESS_RETRY_STEP_MS));
+        }
+      }
+      if (log) log(`[9router] Open access settings patch gave up after ${OPEN_ACCESS_RETRY_MS / 1000}s`);
+    } finally {
+      openAccessLoopRunning = false;
+    }
+  })();
+}
+
 export async function start(log) {
   const live = findListenerForPort(ROUTER_PORT);
   if (live && live > 0) {
     startupState = 'running';
     startupError = '';
-    try {
-      await applyOpenAccessSettings(log);
-    } catch (error) {
-      if (log) log(`[9router] Open access settings patch failed: ${error.message}`);
-    }
+    ensureOpenAccessSettings(log);
     return getStatus();
   }
   if (startupPromise) return getStatus();
@@ -622,11 +684,7 @@ export async function start(log) {
         if (healthy) {
           startupState = 'running';
           if (log) log(`[9router] Health check passed on port ${ROUTER_PORT}`);
-          try {
-            await applyOpenAccessSettings(log);
-          } catch (error) {
-            if (log) log(`[9router] Open access settings patch failed: ${error.message}`);
-          }
+          ensureOpenAccessSettings(log);
           writeHermesConfig();
         } else {
           startupState = 'error';
@@ -726,58 +784,6 @@ export async function stop(log) {
     else log('[9router] Already stopped');
   }
   return getStatus();
-}
-
-function watchdogCooldown() {
-  const backoff = Math.min(watchdogFailures, ROUTER_WATCHDOG_MAX_BACKOFF);
-  return ROUTER_WATCHDOG_COOLDOWN_MS * 2 ** backoff;
-}
-
-function watchdogTick() {
-  if (findListenerForPort(ROUTER_PORT)) {
-    if (watchdogFailures > 0) {
-      watchdogFailures = 0;
-      console.log(`[9router] Watchdog: listener recovered on port ${ROUTER_PORT}`);
-    }
-    return;
-  }
-  if (startupPromise || startupState === 'installing' || startupState === 'starting' || startupState === 'stopped') return;
-  if (Date.now() - watchdogLastRestartAt < watchdogCooldown()) return;
-  watchdogLastRestartAt = Date.now();
-  console.log(`[9router] Watchdog: no listener on port ${ROUTER_PORT}, restarting`);
-  restart(console.log).then((status) => {
-    if (status.livePort) {
-      watchdogFailures = 0;
-      console.log(`[9router] Watchdog: recovered on port ${ROUTER_PORT}`);
-    } else {
-      watchdogFailures += 1;
-      console.warn(`[9router] Watchdog: restart attempt ${watchdogFailures} did not produce a listener`);
-    }
-  }).catch((error) => {
-    watchdogFailures += 1;
-    console.warn(`[9router] Watchdog: restart failed: ${error.message}`);
-  });
-}
-
-export function enableWatchdog(log = console.log) {
-  if (watchdogTimer) return watchdogTimer;
-  watchdogTimer = setInterval(() => {
-    try {
-      watchdogTick();
-    } catch (error) {
-      log(`[9router] Watchdog tick error: ${error.message}`);
-    }
-  }, ROUTER_WATCHDOG_INTERVAL_MS);
-  watchdogTimer.unref?.();
-  log(`[9router] Watchdog enabled (interval ${ROUTER_WATCHDOG_INTERVAL_MS}ms, cooldown ${ROUTER_WATCHDOG_COOLDOWN_MS}ms)`);
-  return watchdogTimer;
-}
-
-export function disableWatchdog() {
-  if (watchdogTimer) {
-    clearInterval(watchdogTimer);
-    watchdogTimer = null;
-  }
 }
 
 export { ROUTER_PORT, ROUTER_API_KEY, ROUTER_MODEL, patchRouterDashboardGuard };
