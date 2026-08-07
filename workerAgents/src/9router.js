@@ -421,7 +421,21 @@ function buildBootstrapCommand(port = ROUTER_PORT) {
     '    echo "[9router] Build complete"',
     '  fi',
     'fi',
-    buildLaunchCommand(port)
+    'if command -v 9router >/dev/null 2>&1; then',
+    '  ROUTER_SERVER="$(npm root -g 2>/dev/null)/9router/app/server.js"',
+    '  if [ ! -f "$ROUTER_SERVER" ]; then ROUTER_SERVER="$STANDALONE_DIR/server.js"; fi',
+    'else',
+    '  ROUTER_SERVER="$STANDALONE_DIR/server.js"',
+    'fi',
+    'export NODE_ENV=production',
+    `export PORT=${port}`,
+    'export HOSTNAME=127.0.0.1',
+    `export NEXT_PUBLIC_BASE_URL=http://127.0.0.1:${port}`,
+    `export BASE_URL=http://127.0.0.1:${port}`,
+    'export DATA_DIR=$DATA_DIR',
+    'mkdir -p "$DATA_DIR"',
+    'cd "$(dirname "$ROUTER_SERVER")"',
+    'exec node "$ROUTER_SERVER"',
   ].join('\n');
 }
 
