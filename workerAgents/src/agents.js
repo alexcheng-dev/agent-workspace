@@ -233,6 +233,35 @@ function openWorkDir() {
   return process.env.OPENWORK_DIR || path.join(os.homedir(), 'openwork');
 }
 
+const OPENWORK_VITE_PATCH_MARK = 'sshworker: force esnext for Vite dep optimizer (esbuild 0.28.1)';
+
+function patchOpenWorkViteConfig(log) {
+  const configPath = path.join(openWorkDir(), 'apps', 'app', 'vite.config.ts');
+  if (!fs.existsSync(configPath)) {
+    if (log) log('[openwork] vite.config.ts not found, skipping esbuild optimizer patch');
+    return false;
+  }
+  let source = fs.readFileSync(configPath, 'utf8');
+  if (source.includes(OPENWORK_VITE_PATCH_MARK)) {
+    if (log) log('[openwork] vite.config.ts already patched for esnext dep optimizer');
+    return false;
+  }
+  const needle = '  server: {';
+  if (!source.includes(needle)) {
+    if (log) log('[openwork] vite.config.ts shape changed, skipping esbuild optimizer patch');
+    return false;
+  }
+  const replacement = `  // ${OPENWORK_VITE_PATCH_MARK}
+  optimizeDeps: {
+    esbuildOptions: { target: "esnext" },
+  },
+
+  server: {`;
+  fs.writeFileSync(configPath, source.replace(needle, replacement));
+  if (log) log('[openwork] Patched vite.config.ts dep optimizer target to esnext');
+  return true;
+}
+
 async function ensureOpenWorkRepo(log) {
   const dir = openWorkDir();
   const repo = process.env.OPENWORK_GIT_URL || 'https://github.com/different-ai/openwork.git';
@@ -247,6 +276,14 @@ async function ensureOpenWorkInstalled(log) {
   await ensureGlobalPackage('opencode', 'opencode-ai', log);
   const { dir } = await ensureOpenWorkRepo(log);
   await runCommand(`cd "${dir}" && pnpm install --frozen-lockfile`, { onData: log });
+  if (patchOpenWorkViteConfig(log)) {
+    for (const cachePath of [
+      path.join(dir, 'apps', 'app', 'node_modules', '.vite'),
+      path.join(dir, 'node_modules', '.vite')
+    ]) {
+      fs.rmSync(cachePath, { recursive: true, force: true });
+    }
+  }
   return dir;
 }
 
