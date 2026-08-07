@@ -1,5 +1,6 @@
 const express = require('express');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const multer = require('multer');
 
@@ -9,6 +10,11 @@ const PORT = process.env.PORT || 3000;
 // Root directory for file browsing. Defaults to the filesystem root so the
 // browser has full access to the system; set STORAGE_DIR to serve a subtree.
 const ROOT_DIR = path.resolve(process.env.STORAGE_DIR || '/');
+
+// Default directory the Explorer lands in when opened. Defaults to the
+// current user's home directory (e.g. /root on workers). Set START_DIR to
+// override. Kept relative to ROOT_DIR so crumbs/navigation stay consistent.
+const START_PATH = path.relative(ROOT_DIR, path.resolve(process.env.START_DIR || os.homedir()));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -201,6 +207,11 @@ app.post('/api/upload', upload.array('files'), (req, res) => {
   res.json({ success: true, count: req.files ? req.files.length : 0 });
 });
 
+// API: Default path for a fresh Explorer load.
+app.get('/api/start', (req, res) => {
+  res.json({ path: START_PATH });
+});
+
 app.get(['/', '/explorer', '/browse'], (req, res) => sendExplorer(res));
 
 // Directory routes render Explorer; file routes stream the raw file for viewing.
@@ -243,6 +254,7 @@ app.get('/edit/*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
   console.log(`Serving filesystem root: ${ROOT_DIR}`);
+  console.log(`Default start directory: ${START_PATH || ROOT_DIR}`);
   console.log(`File Explorer: http://localhost:${PORT}/`);
   console.log(`Browse directory: http://localhost:${PORT}/browse/<path>`);
   console.log(`Edit text file: http://localhost:${PORT}/edit/<path>`);

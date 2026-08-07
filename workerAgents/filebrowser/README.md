@@ -5,6 +5,9 @@ A standalone web-based file manager with a Windows 11 File Explorer UI.
 ## Features
 
 - **Explorer at `/`**: Windows 11 Explorer UI is the default route.
+- **Starts in your home dir**: a fresh Explorer open lands in the current
+  user's home directory (`/root` on workers), with full system access one
+  breadcrumb away.
 - **Path routing**: directories open at `/browse/<path>`, files stream at
   `/browse/<path>`, and text files open in the editor at `/edit/<path>`.
 - **Full Media Viewer & Editor**:
@@ -30,6 +33,10 @@ npm start
 
 The server serves the entire filesystem from `/` by default. Set `STORAGE_DIR`
 to serve only a subtree (for example `STORAGE_DIR=$HOME`).
+
+The Explorer opens on the current user's home directory by default
+(`process.env.HOME` / `os.homedir()`). Set `START_DIR` to change the landing
+folder (for example `START_DIR=/`) while keeping full system access.
 
 Default access points:
 - Explorer UI: `http://localhost:3000/`

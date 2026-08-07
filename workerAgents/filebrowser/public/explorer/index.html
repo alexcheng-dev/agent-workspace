@@ -614,13 +614,18 @@
     document.onclick = () => { selectedItem = null; render(); updateStatus(); };
     searchInput.oninput = () => render();
 
-    // Initial load
+    // Initial load. Landing on an explicit path stays put; landing on the
+    // bare Explorer (/) starts in the user's home directory by default.
     const initialRoute = parseRoute();
     if (initialRoute.mode === 'edit' && initialRoute.path) {
       loadFiles(parentPath(initialRoute.path), true);
       viewOrEditFile(initialRoute.path, { name: initialRoute.path.split('/').pop(), type: 'text' });
-    } else {
+    } else if (initialRoute.path) {
       loadFiles(initialRoute.path, true);
+    } else {
+      const startRes = await fetch('/api/start');
+      const startData = await startRes.json();
+      loadFiles(startData.path, true);
     }
 
     window.addEventListener('popstate', () => {

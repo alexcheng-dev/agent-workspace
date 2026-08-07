@@ -261,6 +261,7 @@ def html_page(status):
     active = int(status.get('active_connections') or 0)
     total = int(status.get('total_connections') or 0)
     reconnects = int(status.get('reconnects') or 0)
+    dropped = int(status.get('dropped_connections') or 0)
     last_error = status.get('last_error') or 'None'
     body = f'''<!doctype html>
 <html lang="en">
@@ -479,9 +480,10 @@ def html_page(status):
         <div class="metric"><div class="label">Reconnects</div><div class="value">{reconnects}</div></div>
       </div>
       <div class="details">
-        <div class="metric wide"><div class="label">Public URL</div><div class="value"><a href="{esc(url)}">{esc(url or 'unknown')}</a></div></div>
+        <div class="metric"><div class="label">Public URL</div><div class="value"><a href="{esc(url)}">{esc(url or 'unknown')}</a></div></div>
         <div class="metric"><div class="label">Target</div><div class="value">{esc(target or 'unknown')}</div></div>
         <div class="metric"><div class="label">Broker</div><div class="value">{esc(status.get('server') or 'unknown')}</div></div>
+        <div class="metric"><div class="label">Dropped</div><div class="value">{dropped}</div></div>
       </div>
       <div class="incident"><span class="bang">!</span><span>{esc(last_error)}</span></div>
     </section>

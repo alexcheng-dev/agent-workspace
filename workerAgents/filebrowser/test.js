@@ -1,6 +1,7 @@
 const assert = require('assert');
 const { spawn } = require('child_process');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 
 const TEST_PORT = 3847;
@@ -53,6 +54,19 @@ async function runTests() {
   assert.strictEqual(filesRes.status, 200, 'API /api/files should return 200');
   assert.ok(Array.isArray(filesRes.data.items), 'items should be an array');
   console.log('✔ /api/files API works correctly');
+
+  // 0b. Default start path should point at the user's home dir
+  const startRes = await request('/api/start');
+  assert.strictEqual(startRes.status, 200, 'API /api/start should return 200');
+  assert.strictEqual(typeof startRes.data.path, 'string', 'start path should be a string');
+  const home = os.homedir();
+  const expectedStart = process.env.START_DIR ? path.resolve(process.env.START_DIR) : home;
+  assert.strictEqual(
+    path.resolve(storageRoot, startRes.data.path),
+    path.resolve(expectedStart),
+    `start path should point at ${expectedStart}`
+  );
+  console.log(`✔ /api/start returns home start path (${startRes.data.path || '(root)'})`);
 
   // 2. Check Explorer root and route contract
   const explorerRes = await request('/');

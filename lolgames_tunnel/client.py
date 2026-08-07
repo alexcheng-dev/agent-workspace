@@ -7,6 +7,9 @@ import sys
 from .common import CONTROL_PORT, b64, now_iso, recv, send, ub64, write_status
 from .status_server import run_status_server
 
+CONN_QUEUE_MAX = int(os.environ.get('LOLGAMES_TUNNEL_CONN_QUEUE', '64') or '64')
+OUT_QUEUE_MAX = int(os.environ.get('LOLGAMES_TUNNEL_OUT_QUEUE', '128') or '128')
+
 
 def default_history_file(status_file):
     base, ext = os.path.splitext(status_file)
@@ -66,6 +69,7 @@ async def client_once(args):
         'last_close_at': '',
         'active_connections': 0,
         'total_connections': 0,
+        'dropped_connections': int(getattr(args, '_dropped_connections', 0)),
         'reconnects': getattr(args, '_reconnects', 0),
         'history_file': args.history_file,
     }
@@ -75,6 +79,23 @@ async def client_once(args):
     reader, writer = await asyncio.open_connection(args.server, CONTROL_PORT)
     lock = asyncio.Lock()
     conns = {}
+    out_queue = asyncio.Queue(maxsize=OUT_QUEUE_MAX)
+
+    async def control_out():
+        """Single writer for the shared control socket. Every broker-bound
+        message goes through the bounded out_queue, so a slow broker or a
+        congested network throttles/drops per connection instead of letting
+        one pump_local block the whole registration."""
+        try:
+            while True:
+                msg = await out_queue.get()
+                if msg is None:
+                    break
+                await send(writer, msg, lock)
+        except asyncio.CancelledError:
+            pass
+
+    out_task = asyncio.create_task(control_out())
     try:
         registration = {
             'type': 'register',
@@ -85,7 +106,10 @@ async def client_once(args):
         expires_at = os.environ.get('LOLGAMES_TUNNEL_EXPIRES_AT', '').strip()
         if expires_at:
             registration['expires_at'] = expires_at
-        await send(writer, registration, lock)
+        try:
+            out_queue.put_nowait(registration)
+        except asyncio.QueueFull:
+            raise ConnectionError('control socket backed up before registration')
         try:
             msg = await asyncio.wait_for(recv(reader), timeout=45)
         except asyncio.TimeoutError as exc:
@@ -95,6 +119,7 @@ async def client_once(args):
         if not msg:
             raise ConnectionError('broker closed control connection before registration')
     except BaseException:
+        out_task.cancel()
         writer.close()
         raise
     print(msg['url'], flush=True)
@@ -115,7 +140,34 @@ async def client_once(args):
             status['last_ping_at'] = now_iso()
             add_event(args, status, 'ping', 'sent keepalive ping')
             write_status(args.status_file, status)
-            await send(writer, {'type': 'ping'}, lock)
+            try:
+                out_queue.put_nowait({'type': 'ping'})
+            except asyncio.QueueFull:
+                pass
+
+    async def close_conn(conn_id, entry, error='', notify_broker=True):
+        """Tear down one connection and its relay task. Safe to call once;
+        later calls from the local pump or broker close are no-ops."""
+        if conns.pop(conn_id, None) is None:
+            return
+        if not entry['closed']:
+            entry['closed'] = True
+            status['last_close_at'] = now_iso()
+            status['active_connections'] = max(0, int(status.get('active_connections') or 0) - 1)
+            add_event(args, status, 'close', f'closed connection {conn_id}' + (f': {error}' if error else ''), connection_id=conn_id, error=error or '')
+            write_status(args.status_file, status)
+            if notify_broker:
+                try:
+                    out_queue.put_nowait({'type': 'close', 'id': conn_id, 'error': error})
+                except asyncio.QueueFull:
+                    pass
+        task = entry.get('task')
+        if task:
+            task.cancel()
+        try:
+            entry['writer'].close()
+        except Exception:
+            pass
 
     async def pump_local(conn_id, local_reader):
         try:
@@ -123,15 +175,37 @@ async def client_once(args):
                 data = await local_reader.read(32768)
                 if not data:
                     break
-                await send(writer, {'type': 'data', 'id': conn_id, 'data': b64(data)}, lock)
+                try:
+                    out_queue.put_nowait({'type': 'data', 'id': conn_id, 'data': b64(data)})
+                except asyncio.QueueFull:
+                    entry = conns.get(conn_id)
+                    if entry is not None:
+                        await close_conn(conn_id, entry, error='control socket backed up')
+                    break
+        finally:
+            entry = conns.get(conn_id)
+            if entry is not None and not entry['closed']:
+                await close_conn(conn_id, entry)
+
+    async def relay_to_local(conn_id, entry):
+        """Broker -> local pump for one connection. Reads from the connection's
+        bounded queue so a slow local target blocks only its own connection."""
+        try:
+            while True:
+                msg = await entry['queue'].get()
+                if msg is None:
+                    break
+                data = ub64(msg.get('data') or '')
+                if data:
+                    entry['writer'].write(data)
+                    await entry['writer'].drain()
+        except asyncio.CancelledError:
+            pass
         finally:
             try:
-                await send(writer, {'type': 'close', 'id': conn_id}, lock)
-            finally:
-                status['last_close_at'] = now_iso()
-                status['active_connections'] = max(0, int(status.get('active_connections') or 0) - 1)
-                add_event(args, status, 'close', f'closed connection {conn_id}', connection_id=conn_id)
-                write_status(args.status_file, status)
+                entry['writer'].close()
+            except Exception:
+                pass
 
     keepalive_task = asyncio.create_task(keepalive())
     try:
@@ -168,31 +242,61 @@ async def client_once(args):
                     status['active_connections'] = max(0, int(status.get('active_connections') or 0) - 1)
                     add_event(args, status, 'error', f'target connection failed: {exc}', level='error', connection_id=conn_id, target_port=connect_port, error=str(exc))
                     write_status(args.status_file, status)
-                    await send(writer, {'type': 'close', 'id': conn_id, 'error': str(exc)}, lock)
+                    try:
+                        out_queue.put_nowait({'type': 'close', 'id': conn_id, 'error': str(exc)})
+                    except asyncio.QueueFull:
+                        pass
                     continue
-                conns[conn_id] = local_writer
+                entry = {
+                    'writer': local_writer,
+                    'queue': asyncio.Queue(maxsize=CONN_QUEUE_MAX),
+                    'task': None,
+                    'closed': False,
+                }
+                conns[conn_id] = entry
                 initial = ub64(msg.get('initial', ''))
                 if initial:
-                    local_writer.write(initial)
-                    await local_writer.drain()
+                    try:
+                        entry['queue'].put_nowait({'type': 'data', 'data': b64(initial)})
+                    except asyncio.QueueFull:
+                        status['dropped_connections'] = int(status.get('dropped_connections') or 0) + 1
+                        add_event(args, status, 'drop', f'dropped slow connection {conn_id}', level='warn', connection_id=conn_id)
+                        write_status(args.status_file, status)
+                        await close_conn(conn_id, entry, error='local consumer too slow')
+                        continue
+                entry['task'] = asyncio.create_task(relay_to_local(conn_id, entry))
                 task = asyncio.create_task(pump_local(conn_id, local_reader))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             elif typ == 'data' and conn_id in conns:
-                conns[conn_id].write(ub64(msg['data']))
-                await conns[conn_id].drain()
+                entry = conns[conn_id]
+                try:
+                    entry['queue'].put_nowait(msg)
+                except asyncio.QueueFull:
+                    status['dropped_connections'] = int(status.get('dropped_connections') or 0) + 1
+                    add_event(args, status, 'drop', f'dropped slow connection {conn_id}', level='warn', connection_id=conn_id)
+                    write_status(args.status_file, status)
+                    await close_conn(conn_id, entry, error='local consumer too slow')
             elif typ == 'close' and conn_id in conns:
-                status['last_close_at'] = now_iso()
-                status['active_connections'] = max(0, int(status.get('active_connections') or 0) - 1)
-                add_event(args, status, 'close', f'broker closed connection {conn_id}', connection_id=conn_id)
-                write_status(args.status_file, status)
-                conns.pop(conn_id).close()
+                await close_conn(conn_id, conns[conn_id], notify_broker=False)
     finally:
+        args._dropped_connections = int(status.get('dropped_connections') or 0)
         status['ok'] = False
         status['state'] = 'disconnected'
         add_event(args, status, 'reconnect', 'control connection disconnected', level='warn')
         write_status(args.status_file, status)
         keepalive_task.cancel()
         await asyncio.gather(keepalive_task, return_exceptions=True)
+        for conn_id in list(conns):
+            await close_conn(conn_id, conns[conn_id], error='control session lost', notify_broker=False)
+        try:
+            out_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            out_task.cancel()
+        try:
+            await asyncio.wait_for(out_task, timeout=2)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            out_task.cancel()
+            await asyncio.gather(out_task, return_exceptions=True)
         writer.close()
         try:
             await writer.wait_closed()
@@ -223,6 +327,7 @@ async def client(args):
                     'subdomain': args.name or '',
                     'pid': os.getpid(),
                     'reconnects': args._reconnects,
+                    'dropped_connections': int(getattr(args, '_dropped_connections', 0)),
                     'last_error': str(exc),
                     'history_file': args.history_file,
                 }
