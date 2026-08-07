@@ -16,21 +16,11 @@ const ROUTER_API_KEY = process.env.WORKER_AGENTS_9ROUTER_API_KEY || 'local-dev-k
 const ROUTER_MODEL = process.env.WORKER_AGENTS_9ROUTER_MODEL || 'opencode/big-pickle';
 const OPEN_ACCESS_PATCH_MARK = 'sshworker: open remote LLM API access when requireApiKey=false';
 const OPEN_ACCESS_PATCH_SCRIPT = path.join(__dirname, '..', 'scripts', 'patch-9router-dashboard-guard.mjs');
-const HF_ENDPOINT_PROVIDER_NAME = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_NAME || 'HF DeepSeek V4 Flash';
-const HF_ENDPOINT_PROVIDER_PREFIX = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_PREFIX || 'hf-free';
-const HF_ENDPOINT_PROVIDER_ID = process.env.WORKER_AGENTS_HF_ENDPOINT_PROVIDER_ID || `openai-compatible-chat-${HF_ENDPOINT_PROVIDER_PREFIX}`;
-const HF_ENDPOINT_CONNECTION_ID = process.env.WORKER_AGENTS_HF_ENDPOINT_CONNECTION_ID || 'worker-agents-hf-endpoint';
-const HF_ENDPOINT_BASE_URL = process.env.WORKER_AGENTS_HF_ENDPOINT_BASE_URL || 'https://q5dh1rfszfym23hj.us-east-2.aws.endpoints.huggingface.cloud/v1';
-const HF_ENDPOINT_MODEL = process.env.WORKER_AGENTS_HF_ENDPOINT_MODEL || 'deepseek-ai/DeepSeek-V4-Flash-0731';
-const HF_ENDPOINT_API_KEY = process.env.WORKER_AGENTS_HF_ENDPOINT_API_KEY || 'no-api-key';
 const HEALTH_TIMEOUT_MS = Number.parseInt(process.env.ROUTER_HEALTH_TIMEOUT_MS || '120000', 10);
 const HEALTH_POLL_MS = 2000;
 let startupPromise = null;
 let startupState = 'idle';
 let startupError = '';
-let providerSeedPromise = null;
-let providerSeeded = false;
-let providerSeedFailed = false;
 
 
 function nextBuildArtifacts() {
@@ -82,22 +72,6 @@ function execPowerShellStrict(command) {
     timeout: 600000,
     env: { ...process.env, PATH: defaultPath }
   });
-}
-
-function hasCommand(command) {
-  try {
-    const executable = process.platform === 'win32' ? 'where.exe' : '/bin/sh';
-    const args = process.platform === 'win32' ? [command] : ['-c', `command -v "$1"`, 'sh', command];
-    execFileSync(executable, args, {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5000,
-      env: { ...process.env, PATH: defaultPath },
-    });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function findRouterPackagePath() {
@@ -160,37 +134,6 @@ function killExistingListeners() {
     }
   }
   return pid && pid > 0 ? pid : null;
-}
-
-async function relaunchRouterAfterProviderSeed(log) {
-  if (log) log('[9router] Restarting to load seeded provider');
-  killExistingListeners();
-  const logFd = fs.openSync(ROUTER_LOG_PATH, 'a');
-  let child;
-  if (process.platform === 'win32') {
-    child = launchWindowsStandalone(logFd);
-  } else {
-    child = spawn(shellBin, ['-lc', buildLaunchCommand()], {
-      detached: true,
-      stdio: ['ignore', logFd, logFd],
-      env: { ...process.env, PATH: defaultPath },
-    });
-  }
-  child.unref();
-  fs.closeSync(logFd);
-  const healthy = await waitForHealth();
-  if (!healthy) {
-    throw new Error(`9Router provider reload failed after ${HEALTH_TIMEOUT_MS / 1000}s`);
-  }
-  if (log) log('[9router] Provider reload complete');
-}
-
-async function ensureHfEndpointProviderLoaded(log) {
-  const seeded = await ensureHfEndpointProvider(log);
-  if (seeded) {
-    await relaunchRouterAfterProviderSeed(log);
-  }
-  return seeded;
 }
 
 async function ensureRepo(log) {
@@ -542,16 +485,7 @@ async function waitForHealth(timeoutMs = HEALTH_TIMEOUT_MS) {
   return false;
 }
 
-async function ensureHfEndpointProvider(log) {
-  if (providerSeeded) return false;
-  if (providerSeedPromise) return providerSeedPromise;
-  providerSeedPromise = doEnsureHfEndpointProvider(log).finally(() => {
-    providerSeedPromise = null;
-  });
-  return providerSeedPromise;
-}
-
-async function doEnsureHfEndpointProvider(log) {
+async function applyOpenAccessSettings(log) {
   const dataDirCandidates = [
     process.env.DATA_DIR,
     process.env.HOME ? path.join(process.env.HOME, '.9router', 'data') : '',
@@ -589,108 +523,7 @@ async function doEnsureHfEndpointProvider(log) {
       await new Promise((resolve) => setTimeout(resolve, DB_WAIT_STEP_MS));
     }
   }
-
-  const now = new Date().toISOString();
-  const nodeData = JSON.stringify({
-    prefix: HF_ENDPOINT_PROVIDER_PREFIX,
-    apiType: 'chat',
-    baseUrl: HF_ENDPOINT_BASE_URL,
-  });
-  const connectionData = JSON.stringify({
-    apiKey: HF_ENDPOINT_API_KEY,
-    defaultModel: HF_ENDPOINT_MODEL,
-    testStatus: 'unknown',
-    providerSpecificData: {
-      prefix: HF_ENDPOINT_PROVIDER_PREFIX,
-      apiType: 'chat',
-      baseUrl: HF_ENDPOINT_BASE_URL,
-      nodeName: HF_ENDPOINT_PROVIDER_NAME,
-      connectionProxyEnabled: false,
-      connectionProxyUrl: '',
-      connectionNoProxy: '',
-    },
-  });
-  const sql = `
-INSERT INTO providerNodes(id, type, name, data, createdAt, updatedAt)
-VALUES($id, 'openai-compatible', $name, $nodeData, $now, $now)
-ON CONFLICT(id) DO UPDATE SET
-  type=excluded.type,
-  name=excluded.name,
-  data=excluded.data,
-  updatedAt=excluded.updatedAt;
-
-INSERT INTO providerConnections(id, provider, authType, name, email, priority, isActive, data, createdAt, updatedAt)
-VALUES($connectionId, $id, 'apikey', $name, NULL, 1, 1, $connectionData, $now, $now)
-ON CONFLICT(id) DO UPDATE SET
-  provider=excluded.provider,
-  authType=excluded.authType,
-  name=excluded.name,
-  priority=excluded.priority,
-  isActive=excluded.isActive,
-  data=excluded.data,
-  updatedAt=excluded.updatedAt;
-`;
-  if (hasCommand('sqlite3')) {
-    execFileSync('sqlite3', [
-      dbPath,
-      '-cmd', `.parameter set $id ${JSON.stringify(HF_ENDPOINT_PROVIDER_ID)}`,
-      '-cmd', `.parameter set $connectionId ${JSON.stringify(HF_ENDPOINT_CONNECTION_ID)}`,
-      '-cmd', `.parameter set $name ${JSON.stringify(HF_ENDPOINT_PROVIDER_NAME)}`,
-      '-cmd', `.parameter set $nodeData ${JSON.stringify(nodeData)}`,
-      '-cmd', `.parameter set $connectionData ${JSON.stringify(connectionData)}`,
-      '-cmd', `.parameter set $now ${JSON.stringify(now)}`,
-      sql,
-    ], {
-      encoding: 'utf8',
-      timeout: 10000,
-      env: { ...process.env, PATH: defaultPath },
-    });
-  } else {
-    const routerPackagePath = findRouterPackagePath();
-    const seedScript = `
-const { createRequire } = require('node:module');
-const requireFromRouter = createRequire(process.argv[1]);
-const Database = requireFromRouter('better-sqlite3');
-const db = new Database(process.argv[2]);
-const params = {
-  id: process.argv[3],
-  connectionId: process.argv[4],
-  name: process.argv[5],
-  nodeData: process.argv[6],
-  connectionData: process.argv[7],
-  now: process.argv[8],
-};
-const nodeSql = \`INSERT INTO providerNodes(id, type, name, data, createdAt, updatedAt)
-VALUES(@id, 'openai-compatible', @name, @nodeData, @now, @now)
-ON CONFLICT(id) DO UPDATE SET type=excluded.type, name=excluded.name, data=excluded.data, updatedAt=excluded.updatedAt\`;
-const connSql = \`INSERT INTO providerConnections(id, provider, authType, name, email, priority, isActive, data, createdAt, updatedAt)
-VALUES(@connectionId, @id, 'apikey', @name, NULL, 1, 1, @connectionData, @now, @now)
-ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, authType=excluded.authType, name=excluded.name, priority=excluded.priority, isActive=excluded.isActive, data=excluded.data, updatedAt=excluded.updatedAt\`;
-db.transaction(() => {
-  db.prepare(nodeSql).run(params);
-  db.prepare(connSql).run(params);
-})();
-db.close();
-`;
-    execFileSync(process.execPath, [
-      '-e',
-      seedScript,
-      routerPackagePath,
-      dbPath,
-      HF_ENDPOINT_PROVIDER_ID,
-      HF_ENDPOINT_CONNECTION_ID,
-      HF_ENDPOINT_PROVIDER_NAME,
-      nodeData,
-      connectionData,
-      now,
-    ], {
-      encoding: 'utf8',
-      timeout: 10000,
-      env: { ...process.env, PATH: defaultPath },
-    });
-  }
-  if (log) log(`[9router] Added provider ${HF_ENDPOINT_PROVIDER_PREFIX}/${HF_ENDPOINT_MODEL}`);
-  providerSeeded = true;
+  if (log) log('[9router] Open API access settings applied');
   return true;
 }
 
@@ -746,9 +579,9 @@ export async function start(log) {
     startupState = 'running';
     startupError = '';
     try {
-      await ensureHfEndpointProviderLoaded(log);
+      await applyOpenAccessSettings(log);
     } catch (error) {
-      if (log) log(`[9router] HF endpoint provider seed failed: ${error.message}`);
+      if (log) log(`[9router] Open access settings patch failed: ${error.message}`);
     }
     return getStatus();
   }
@@ -784,9 +617,9 @@ export async function start(log) {
           startupState = 'running';
           if (log) log(`[9router] Health check passed on port ${ROUTER_PORT}`);
           try {
-            await ensureHfEndpointProviderLoaded(log);
+            await applyOpenAccessSettings(log);
           } catch (error) {
-            if (log) log(`[9router] HF endpoint provider seed failed: ${error.message}`);
+            if (log) log(`[9router] Open access settings patch failed: ${error.message}`);
           }
           writeHermesConfig();
         } else {
@@ -811,15 +644,6 @@ export async function start(log) {
 export function getStatus() {
   const listenerPid = findListenerForPort(ROUTER_PORT);
   const running = Boolean(listenerPid);
-  if (running && !providerSeeded && !providerSeedFailed) {
-    ensureHfEndpointProvider().catch((error) => {
-      // A failed seed is retried on every status poll otherwise, which churns
-      // the event loop on long-running workers. Try once, then stop until a
-      // restart explicitly resets the flag.
-      providerSeedFailed = true;
-      console.warn(`[9router] HF endpoint provider seed failed: ${error.message}`);
-    });
-  }
   if (running) {
     startupState = 'running';
     startupError = '';
@@ -882,9 +706,6 @@ export async function restart(log) {
   startupPromise = null;
   startupState = 'idle';
   startupError = '';
-  providerSeeded = false;
-  providerSeedFailed = false;
-  providerSeedPromise = null;
   killExistingListeners();
   return start(log);
 }
