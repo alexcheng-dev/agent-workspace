@@ -90,10 +90,10 @@ function findRouterPackagePath() {
     path.join('/tmp', '9router'),
   ].filter(Boolean);
   const packagePath = candidates
-    .map((candidate) => path.join(candidate, 'package.json'))
+    .map((candidate) => (candidate.endsWith('package.json') ? candidate : path.join(candidate, 'package.json')))
     .find((candidate) => fs.existsSync(candidate));
   if (!packagePath) {
-    throw new Error(`9Router package.json not found in ${candidates.join(', ')}`);
+    throw new Error(`9Router package.json not found; checked npm global, hosted toolcache, nvm, Cellar, HOME, /root, /tmp`);
   }
   return packagePath;
 }
@@ -104,6 +104,13 @@ function npmGlobalPackageCandidates() {
   if (npmRoot) roots.add(npmRoot);
   if (process.env.NPM_CONFIG_PREFIX) {
     roots.add(path.join(process.env.NPM_CONFIG_PREFIX, 'lib', 'node_modules'));
+  }
+  const execDir = path.dirname(process.execPath);
+  for (const rel of [
+    path.join('..', 'lib', 'node_modules'),
+    path.join('..', '..', 'lib', 'node_modules'),
+  ]) {
+    roots.add(path.resolve(execDir, rel));
   }
   for (const root of ['/opt/hostedtoolcache/node', '/usr/local/share/nvm/versions/node', '/usr/local/Cellar/node']) {
     let entries = [];
