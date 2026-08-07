@@ -102,6 +102,9 @@ function hasCommand(command) {
 
 function findRouterPackagePath() {
   const candidates = [
+    path.join(DEFAULT_HOME, '.local', 'lib', 'node_modules', '9router'),
+    '/usr/local/lib/node_modules/9router',
+    '/usr/lib/node_modules/9router',
     ROUTER_HOME,
     process.env.HOME ? path.join(process.env.HOME, '9router') : '',
     process.env.USERPROFILE ? path.join(process.env.USERPROFILE, '9router') : '',
@@ -355,6 +358,22 @@ function shellQuote(value) {
 
 function buildLaunchCommand(port = ROUTER_PORT) {
   const dataDir = path.join(process.env.HOME || '/tmp', '.9router', 'data');
+  if (hasCommand('9router')) {
+    return [
+      `export PATH=${shellQuote(defaultPath)}`,
+      'export NODE_ENV=production',
+      `export PORT=${port}`,
+      'export HOSTNAME=127.0.0.1',
+      `export NEXT_PUBLIC_BASE_URL=http://127.0.0.1:${port}`,
+      `export BASE_URL=http://127.0.0.1:${port}`,
+      `export DATA_DIR=${shellQuote(dataDir)}`,
+      'mkdir -p "$DATA_DIR"',
+      `exec 9router --port ${port} --host 127.0.0.1 --no-browser`
+    ].join('; ');
+  }
+  const installedPackage = path.join(DEFAULT_HOME, '.local', 'lib', 'node_modules', '9router', 'app', 'server.js');
+  const serverJsPath = fs.existsSync(installedPackage) ? installedPackage : path.join(ROUTER_HOME, '.next', 'standalone', 'server.js');
+  const workingDir = fs.existsSync(installedPackage) ? path.dirname(installedPackage) : path.join(ROUTER_HOME, '.next', 'standalone');
   return [
     `export PATH=${shellQuote(defaultPath)}`,
     'export NODE_ENV=production',
@@ -364,8 +383,8 @@ function buildLaunchCommand(port = ROUTER_PORT) {
     `export BASE_URL=http://127.0.0.1:${port}`,
     `export DATA_DIR=${shellQuote(dataDir)}`,
     'mkdir -p "$DATA_DIR"',
-    `cd ${shellQuote(path.join(ROUTER_HOME, '.next', 'standalone'))}`,
-    'exec node server.js',
+    `cd ${shellQuote(workingDir)}`,
+    `exec node ${shellQuote(serverJsPath)}`,
   ].join('; ');
 }
 
@@ -392,28 +411,25 @@ function buildBootstrapCommand(port = ROUTER_PORT) {
     `STATIC_DST=${shellQuote(staticDst)}`,
     `PUBLIC_SRC=${shellQuote(publicSrc)}`,
     `PUBLIC_DST=${shellQuote(publicDst)}`,
-    'if [ ! -f "$ROUTER_HOME/package.json" ]; then',
-    '  echo "[9router] Cloning $ROUTER_GIT_URL..."',
-    '  rm -rf "$ROUTER_HOME"',
-    '  git clone --depth 1 "$ROUTER_GIT_URL" "$ROUTER_HOME"',
-    '  echo "[9router] Clone complete"',
-    '  node "$PATCH_SCRIPT" "$ROUTER_HOME" || echo "[9router] dashboardGuard open-access patch skipped"',
-    'else',
-    '  echo "[9router] Repo already exists"',
+    'if ! command -v 9router >/dev/null 2>&1; then',
+    '  if [ ! -f "$ROUTER_HOME/package.json" ]; then',
+    '    echo "[9router] 9router CLI not found. Installing via npm..."',
+    '    npm i -g 9router@latest --prefer-online || {',
+    '      echo "[9router] npm install failed, falling back to source clone..."',
+    '      rm -rf "$ROUTER_HOME"',
+    '      git clone --depth 1 "$ROUTER_GIT_URL" "$ROUTER_HOME"',
+    '      echo "[9router] Clone complete"',
+    '      node "$PATCH_SCRIPT" "$ROUTER_HOME" || echo "[9router] dashboardGuard open-access patch skipped"',
+    '    }',
+    '  fi',
+    '  if [ -f "$ROUTER_HOME/package.json" ] && [ ! -f "$STANDALONE_DIR/server.js" ]; then',
+    '    echo "[9router] Building fallback from source..."',
+    '    cd "$ROUTER_HOME"',
+    '    npm install',
+    '    DATA_DIR="$DATA_DIR" npm run build',
+    '    echo "[9router] Build complete"',
+    '  fi',
     'fi',
-    'if [ ! -f "$STANDALONE_DIR/server.js" ]; then',
-    '  echo "[9router] Building..."',
-    '  cd "$ROUTER_HOME"',
-    '  npm install',
-    '  DATA_DIR="$DATA_DIR" npm run build',
-    '  echo "[9router] Build complete"',
-    'else',
-    '  echo "[9router] Already built"',
-    'fi',
-    'mkdir -p "$(dirname "$STATIC_DST")"',
-    'rm -rf "$STATIC_DST" "$PUBLIC_DST"',
-    'if [ -d "$STATIC_SRC" ]; then cp -R "$STATIC_SRC" "$STATIC_DST"; fi',
-    'if [ -d "$PUBLIC_SRC" ]; then cp -R "$PUBLIC_SRC" "$PUBLIC_DST"; fi',
     buildLaunchCommand(port)
   ].join('\n');
 }
