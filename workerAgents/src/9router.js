@@ -358,22 +358,13 @@ function shellQuote(value) {
 
 function buildLaunchCommand(port = ROUTER_PORT) {
   const dataDir = path.join(process.env.HOME || '/tmp', '.9router', 'data');
-  if (hasCommand('9router')) {
-    return [
-      `export PATH=${shellQuote(defaultPath)}`,
-      'export NODE_ENV=production',
-      `export PORT=${port}`,
-      'export HOSTNAME=127.0.0.1',
-      `export NEXT_PUBLIC_BASE_URL=http://127.0.0.1:${port}`,
-      `export BASE_URL=http://127.0.0.1:${port}`,
-      `export DATA_DIR=${shellQuote(dataDir)}`,
-      'mkdir -p "$DATA_DIR"',
-      `exec 9router --port ${port} --host 127.0.0.1 --no-browser`
-    ].join('; ');
-  }
-  const installedPackage = path.join(DEFAULT_HOME, '.local', 'lib', 'node_modules', '9router', 'app', 'server.js');
-  const serverJsPath = fs.existsSync(installedPackage) ? installedPackage : path.join(ROUTER_HOME, '.next', 'standalone', 'server.js');
-  const workingDir = fs.existsSync(installedPackage) ? path.dirname(installedPackage) : path.join(ROUTER_HOME, '.next', 'standalone');
+  const installedPackage = [
+    path.join(DEFAULT_HOME, '.local', 'lib', 'node_modules', '9router', 'app', 'server.js'),
+    '/usr/local/lib/node_modules/9router/app/server.js',
+    '/usr/lib/node_modules/9router/app/server.js',
+  ].find((p) => fs.existsSync(p));
+  const serverJsPath = installedPackage || path.join(ROUTER_HOME, '.next', 'standalone', 'server.js');
+  const workingDir = path.dirname(serverJsPath);
   return [
     `export PATH=${shellQuote(defaultPath)}`,
     'export NODE_ENV=production',
